@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flight-path-tracker"
+version = "0.1.0"
+description = "Interactive dashboard to replay aircraft flight paths from lat/lon/altitude logs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Patrick Cahill" }]
+keywords = ["aviation", "flight", "gps", "dash", "plotly", "visualization", "geospatial"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "plotly>=5.24",
+    "dash>=2.17",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+flighttracker = "flighttracker.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/prcahill/flight-path-tracker"
+Repository = "https://github.com/prcahill/flight-path-tracker"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+flighttracker = ["assets/*.css"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]

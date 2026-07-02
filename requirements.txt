@@ -1,0 +1,6 @@
+# Runtime dependencies (all mainstream). For development install use:
+#   pip install -e ".[dev]"
+numpy>=1.24
+pandas>=2.0
+plotly>=5.24
+dash>=2.17
