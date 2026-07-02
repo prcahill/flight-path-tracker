@@ -11,9 +11,12 @@ once to two level-of-detail budgets -- a cheap polyline for the ground track and
 a much sparser altitude-colored marker overlay -- so even multi-million-point
 logs render instantly and pan/zoom stays fluid. Each animation tick advances a
 wall-clock-anchored playback clock, **interpolates the aircraft state between
-samples** (position, altitude, speed, heading), and patches only the marker,
-profile cursors and readouts via ``dash.Patch`` -- the path is never re-sent.
-With Follow enabled the map center glides along the interpolated trajectory.
+samples** (position, altitude, speed, heading), and ships the frame to the
+browser through a ``dcc.Store``; a clientside callback applies it with
+``Plotly.restyle`` so the map is never re-rendered on the hot path -- the user
+can pan and zoom freely while playback is running. Profile cursors and readouts
+update via ``dash.Patch``; the path itself is never re-sent. With Follow
+enabled the map center glides along the interpolated trajectory.
 """
 
 from __future__ import annotations
@@ -322,6 +325,10 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         ]),
 
         dcc.Interval(id="tick", interval=config.interval_ms, disabled=True, n_intervals=0),
+        # Per-tick aircraft sample, applied client-side via Plotly.restyle so
+        # the map never re-renders during playback (keeps drag/pan alive).
+        dcc.Store(id="frame"),
+        dcc.Store(id="frame-ack"),
     ])
 
     _register_callbacks(app, state, config)
@@ -329,20 +336,16 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
 
 
 def _frame_updates(state: _State, s: dict):
-    """Build the per-frame Patch updates (map, profiles) + readout + clock.
+    """Build the per-frame outputs: frame store, profiles Patch, readout, clock.
 
-    Only the aircraft marker is patched (and the map center, when Follow is
-    on), so the user's pan/zoom is preserved and the map stays interactive
-    during playback.
+    The aircraft marker is NOT patched into the map figure here -- the frame
+    dict goes to a ``dcc.Store`` and a clientside callback applies it with
+    ``Plotly.restyle``, which updates trace data without re-rendering the map.
+    That keeps an in-progress drag alive, so the user can pan/zoom freely
+    while playback is running.
     """
     f = state.flight
-    mp = Patch()
-    mp["data"][_HALO]["lat"] = [s["lat"]]
-    mp["data"][_HALO]["lon"] = [s["lon"]]
-    mp["data"][_DOT]["lat"] = [s["lat"]]
-    mp["data"][_DOT]["lon"] = [s["lon"]]
-    if state.follow:
-        mp["layout"]["map"]["center"] = {"lat": s["lat"], "lon": s["lon"]}
+    frame = {"lat": s["lat"], "lon": s["lon"], "follow": state.follow}
 
     pp = Patch()
     tmin = s["t"] / 60.0
@@ -352,16 +355,57 @@ def _frame_updates(state: _State, s: dict):
     pp["data"][3]["y"] = [s["gs"]]
 
     clock = f"{format_duration(s['t'])} / {format_duration(f.t[-1])}"
-    return mp, pp, _readout_children(f, s), clock
+    return frame, pp, _readout_children(f, s), clock
+
+
+def _patch_marker(p: Patch, s: dict) -> Patch:
+    """Refresh the aircraft marker inside a server-side map figure Patch.
+
+    Server patches (basemap / follow) re-render the map from Dash's stored
+    figure, which no longer tracks the marker (the hot path bypasses it via
+    ``Plotly.restyle``). Including the current position prevents a snap-back.
+    """
+    p["data"][_HALO]["lat"] = [s["lat"]]
+    p["data"][_HALO]["lon"] = [s["lon"]]
+    p["data"][_DOT]["lat"] = [s["lat"]]
+    p["data"][_DOT]["lon"] = [s["lon"]]
+    return p
 
 
 def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
+    # Apply each frame client-side: restyle only the halo/dot traces (no map
+    # re-render, so an in-progress drag survives), and in Follow mode glide
+    # the camera along with the aircraft.
+    app.clientside_callback(
+        """
+        function(frame) {
+            if (!frame) { return window.dash_clientside.no_update; }
+            var el = document.getElementById('map');
+            var gd = el && el.querySelector('.js-plotly-plot');
+            if (!gd || !gd.data || gd.data.length < 4) {
+                return window.dash_clientside.no_update;
+            }
+            Plotly.restyle(gd, {
+                lat: [[frame.lat], [frame.lat]],
+                lon: [[frame.lon], [frame.lon]],
+            }, [2, 3]);
+            if (frame.follow) {
+                Plotly.relayout(gd, {'map.center': {lat: frame.lat, lon: frame.lon}});
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("frame-ack", "data"),
+        Input("frame", "data"),
+        prevent_initial_call=True,
+    )
+
     # Playback tick: advance the wall-clock-anchored clock and update the
     # scrubber AND all visuals in a single round-trip (so the map cannot lag
     # behind the scrubber).
     @app.callback(
         Output("scrub", "value", allow_duplicate=True),
-        Output("map", "figure", allow_duplicate=True),
+        Output("frame", "data", allow_duplicate=True),
         Output("profiles", "figure", allow_duplicate=True),
         Output("readout", "children", allow_duplicate=True),
         Output("clock", "children", allow_duplicate=True),
@@ -386,10 +430,10 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
             data_t = float(f.t[-1])
         state.cur_time = data_t
         s = state.sample_at(data_t)
-        mp, pp, ro, clock = _frame_updates(state, s)
+        frame, pp, ro, clock = _frame_updates(state, s)
         disabled = True if ended else no_update
         label = "▶  PLAY" if ended else no_update
-        return data_t, mp, pp, ro, clock, disabled, label
+        return data_t, frame, pp, ro, clock, disabled, label
 
     # Play / pause. Starting (re)anchors the clock; restarts from 0 when at end.
     @app.callback(
@@ -417,7 +461,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
 
     # Manual scrub (only while paused; during playback the tick owns updates).
     @app.callback(
-        Output("map", "figure", allow_duplicate=True),
+        Output("frame", "data", allow_duplicate=True),
         Output("profiles", "figure", allow_duplicate=True),
         Output("readout", "children", allow_duplicate=True),
         Output("clock", "children", allow_duplicate=True),
@@ -444,7 +488,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
             return no_update
         state.follow = bool(value) and "on" in value
         s = state.sample_at(state.cur_time)
-        p = Patch()
+        p = _patch_marker(Patch(), s)  # keep marker in sync (see _patch_marker)
         if state.follow:
             p["layout"]["map"]["center"] = {"lat": s["lat"], "lon": s["lon"]}
             p["layout"]["map"]["zoom"] = config.follow_zoom
@@ -465,7 +509,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         if state.flight is None:
             return no_update
         state.style = style
-        p = Patch()
+        p = _patch_marker(Patch(), state.sample_at(state.cur_time))
         p["layout"]["map"]["style"] = style
         return p
 

@@ -34,9 +34,10 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 - **Drag-and-drop CSV upload** to load a different log at runtime.
 - **Scales to millions of points** — the path is decimated to two display
   budgets (a cheap ground-track polyline plus a sparse altitude-colored
-  overlay; it does not draw every point), and playback patches only the
-  aircraft marker and cursors via `dash.Patch`, advancing by real elapsed time
-  so dense logs skip frames instead of crawling.
+  overlay; it does not draw every point), and marker updates are applied
+  client-side with `Plotly.restyle`, so the map never re-renders during
+  playback and **stays fully draggable while the flight plays**. Playback
+  advances by real elapsed time, so dense logs skip frames instead of crawling.
 
 ## Quickstart
 
