@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -51,10 +52,16 @@ class _State:
         self.config = config
         self.style = config.default_style
         self.follow = False
+        # Playback clock (wall-clock anchored so speed is accurate and jitter-proof).
+        self.cur_time = 0.0
+        self.anchor_wall = 0.0
+        self.anchor_data = 0.0
+        self.last_speed: float | None = None
         self.set_flight(flight)
 
     def set_flight(self, flight: FlightData | None) -> None:
         self.flight = flight
+        self.cur_time = 0.0
         if flight is None:
             return
         c = self.config
@@ -67,6 +74,12 @@ class _State:
         self.prof_alt = flight.alt[p]
         self.prof_gs = flight.gs[p]
         self.tracer_sec = max(c.tracer_min_seconds, c.tracer_fraction * flight.summary.duration_s)
+
+    def index_at(self, t: float) -> int:
+        """Sample index at data-time ``t`` seconds (clamped)."""
+        f = self.flight
+        idx = int(np.searchsorted(f.t, t, side="right")) - 1
+        return max(0, min(f.n - 1, idx))
 
     def tracer_slice(self, idx: int) -> tuple[np.ndarray, np.ndarray]:
         f = self.flight
@@ -103,20 +116,21 @@ def _map_figure(state: _State, idx: int = 0) -> go.Figure:
     ))
     fig.add_trace(go.Scattermap(
         lat=tr_lat, lon=tr_lon, mode="lines",
-        line=dict(width=4, color=c.accent), hoverinfo="skip", name="tracer",
+        line=dict(width=4, color=c.tracer_color), hoverinfo="skip", name="tracer",
     ))
     fig.add_trace(go.Scattermap(
         lat=[f.lat[idx]], lon=[f.lon[idx]], mode="markers",
-        marker=dict(size=15, color="#FFFFFF"),
-        hoverinfo="skip", name="aircraft",
+        marker=dict(size=14, color=c.cursor), hoverinfo="skip", name="aircraft",
     ))
     lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
+    if state.follow:
+        center = dict(lat=float(f.lat[idx]), lon=float(f.lon[idx]))
+        zoom = c.follow_zoom
+    else:
+        center = dict(lat=float(np.mean(lat_lim)), lon=float(np.mean(lon_lim)))
+        zoom = _zoom_for(lat_lim, lon_lim)
     fig.update_layout(
-        map=dict(
-            style=state.style,
-            center=dict(lat=float(np.mean(lat_lim)), lon=float(np.mean(lon_lim))),
-            zoom=_zoom_for(lat_lim, lon_lim),
-        ),
+        map=dict(style=state.style, center=center, zoom=zoom),
         margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor=c.panel, uirevision="keep", showlegend=False,
     )
@@ -134,20 +148,19 @@ def _zoom_for(lat_lim, lon_lim) -> float:
 def _profiles_figure(state: _State, idx: int = 0) -> go.Figure:
     f = state.flight
     c = state.config
+    cm = dict(color=c.cursor, size=9, line=dict(color=c.accent, width=2))
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
                         subplot_titles=("Altitude (ft)", "Ground speed (kt)"))
     fig.add_trace(go.Scatter(x=state.prof_t, y=state.prof_alt, mode="lines",
                              line=dict(color=c.color_alt, width=1.6), hoverinfo="skip"),
                   row=1, col=1)
     fig.add_trace(go.Scatter(x=[f.t[idx] / 60.0], y=[f.alt[idx]], mode="markers",
-                             marker=dict(color=c.accent, size=9, line=dict(color="#000", width=1)),
-                             hoverinfo="skip"), row=1, col=1)
+                             marker=cm, hoverinfo="skip"), row=1, col=1)
     fig.add_trace(go.Scatter(x=state.prof_t, y=state.prof_gs, mode="lines",
                              line=dict(color=c.color_speed, width=1.6), hoverinfo="skip"),
                   row=2, col=1)
     fig.add_trace(go.Scatter(x=[f.t[idx] / 60.0], y=[f.gs[idx]], mode="markers",
-                             marker=dict(color=c.accent, size=9, line=dict(color="#000", width=1)),
-                             hoverinfo="skip"), row=2, col=1)
+                             marker=cm, hoverinfo="skip"), row=2, col=1)
     fig.update_xaxes(title_text="Time (min)", row=2, col=1)
     fig.update_layout(
         template="plotly_dark", showlegend=False,
@@ -239,7 +252,8 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         # Main: map | side panel
         html.Div(className="main", children=[
             html.Div(className="map-wrap", children=[
-                dcc.Graph(id="map", className="map", config={"displayModeBar": False},
+                dcc.Graph(id="map", className="map",
+                          config={"displayModeBar": False, "scrollZoom": True},
                           figure=_map_figure(state) if flight else go.Figure()),
             ]),
             html.Div(className="side", children=[
@@ -259,9 +273,9 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             dcc.Dropdown(id="speed", className="dd speed", clearable=False,
                          options=[{"label": f"{m}×", "value": m} for m in config.speed_multipliers],
                          value=25),
-            dcc.Slider(id="scrub", min=0, max=t_max, value=0, step=None,
-                       marks=None, updatemode="drag",
-                       tooltip={"placement": "bottom", "always_visible": False}),
+            dcc.Slider(id="scrub", min=0, max=t_max, value=0,
+                       step=max(0.1, round(t_max / 1000.0, 2)),
+                       marks=None, updatemode="drag", included=True),
             html.Div(id="clock", className="clock", children="00:00:00 / 00:00:00"),
         ]),
 
@@ -272,89 +286,146 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
     return app
 
 
-def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
-    interval_s = config.interval_ms / 1000.0
+def _frame_updates(state: _State, idx: int):
+    """Build the per-frame Patch updates (map, profiles) + readout + clock.
 
-    # Advance the master clock (scrubber) while playing.
+    Only trace data is patched (and the map center, when Follow is on), so the
+    user's pan/zoom is preserved and the map stays interactive during playback.
+    """
+    f = state.flight
+    mp = Patch()
+    tr_lat, tr_lon = state.tracer_slice(idx)
+    mp["data"][_TRACER]["lat"] = tr_lat.tolist()
+    mp["data"][_TRACER]["lon"] = tr_lon.tolist()
+    mp["data"][_MARKER]["lat"] = [float(f.lat[idx])]
+    mp["data"][_MARKER]["lon"] = [float(f.lon[idx])]
+    if state.follow:
+        mp["layout"]["map"]["center"] = {"lat": float(f.lat[idx]), "lon": float(f.lon[idx])}
+
+    pp = Patch()
+    tmin = float(f.t[idx] / 60.0)
+    pp["data"][1]["x"] = [tmin]
+    pp["data"][1]["y"] = [float(f.alt[idx])]
+    pp["data"][3]["x"] = [tmin]
+    pp["data"][3]["y"] = [float(f.gs[idx])]
+
+    clock = f"{format_duration(f.t[idx])} / {format_duration(f.t[-1])}"
+    return mp, pp, _readout_children(f, idx), clock
+
+
+def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
+    # Playback tick: advance the wall-clock-anchored clock and update the
+    # scrubber AND all visuals in a single round-trip (so the map cannot lag
+    # behind the scrubber).
     @app.callback(
         Output("scrub", "value", allow_duplicate=True),
+        Output("map", "figure", allow_duplicate=True),
+        Output("profiles", "figure", allow_duplicate=True),
+        Output("readout", "children", allow_duplicate=True),
+        Output("clock", "children", allow_duplicate=True),
         Output("tick", "disabled", allow_duplicate=True),
         Output("play", "children", allow_duplicate=True),
         Input("tick", "n_intervals"),
-        State("scrub", "value"), State("scrub", "max"), State("speed", "value"),
+        State("speed", "value"),
         prevent_initial_call=True,
     )
-    def _advance(_n, value, vmax, speed):
-        new = (value or 0.0) + interval_s * (speed or 1)
-        if new >= vmax:
-            return vmax, True, "▶  Play"
-        return new, no_update, no_update
+    def _play_tick(_n, speed):
+        f = state.flight
+        if f is None:
+            return (no_update,) * 7
+        speed = speed or 1
+        if speed != state.last_speed:  # re-anchor on speed change (no time jump)
+            state.anchor_data = state.cur_time
+            state.anchor_wall = time.monotonic()
+            state.last_speed = speed
+        data_t = state.anchor_data + (time.monotonic() - state.anchor_wall) * speed
+        ended = data_t >= f.t[-1]
+        if ended:
+            data_t = float(f.t[-1])
+        state.cur_time = data_t
+        idx = state.index_at(data_t)
+        mp, pp, ro, clock = _frame_updates(state, idx)
+        disabled = True if ended else no_update
+        label = "▶  Play" if ended else no_update
+        return data_t, mp, pp, ro, clock, disabled, label
 
-    # Play / pause toggle (also restarts from the beginning when at the end).
+    # Play / pause. Starting (re)anchors the clock; restarts from 0 when at end.
     @app.callback(
         Output("tick", "disabled"),
         Output("play", "children"),
         Output("scrub", "value", allow_duplicate=True),
         Input("play", "n_clicks"),
-        State("tick", "disabled"), State("scrub", "value"), State("scrub", "max"),
+        State("tick", "disabled"), State("scrub", "value"),
         prevent_initial_call=True,
     )
-    def _play(_clicks, disabled, value, vmax):
-        if state.flight is None:
-            return no_update, no_update, no_update
-        if not disabled:  # currently playing -> pause
-            return True, "▶  Play", no_update
-        reset = 0.0 if (value or 0.0) >= vmax else no_update
-        return False, "❚❚  Pause", reset
-
-    # Master clock -> update marker, tracer, profile cursors, readouts, clock.
-    @app.callback(
-        Output("map", "figure"),
-        Output("profiles", "figure"),
-        Output("readout", "children"),
-        Output("clock", "children"),
-        Input("scrub", "value"),
-        State("follow", "value"),
-    )
-    def _seek(value, follow):
+    def _play(_clicks, disabled, value):
         f = state.flight
         if f is None:
-            return no_update, no_update, no_update, no_update
-        idx = int(np.searchsorted(f.t, value or 0.0, side="right")) - 1
-        idx = max(0, min(f.n - 1, idx))
+            return no_update, no_update, no_update
+        if not disabled:  # currently playing -> pause
+            state.cur_time = value or 0.0
+            return True, "▶  Play", no_update
+        at_end = (value or 0.0) >= f.t[-1]
+        start_t = 0.0 if at_end else float(value or 0.0)
+        state.cur_time = start_t
+        state.anchor_data = start_t
+        state.anchor_wall = time.monotonic()
+        state.last_speed = None
+        return False, "❚❚  Pause", (0.0 if at_end else no_update)
 
-        tr_lat, tr_lon = state.tracer_slice(idx)
-        mp = Patch()
-        mp["data"][_TRACER]["lat"] = tr_lat.tolist()
-        mp["data"][_TRACER]["lon"] = tr_lon.tolist()
-        mp["data"][_MARKER]["lat"] = [float(f.lat[idx])]
-        mp["data"][_MARKER]["lon"] = [float(f.lon[idx])]
-        if follow and "on" in follow:
-            mp["layout"]["map"]["center"] = {"lat": float(f.lat[idx]), "lon": float(f.lon[idx])}
+    # Manual scrub (only while paused; during playback the tick owns updates).
+    @app.callback(
+        Output("map", "figure", allow_duplicate=True),
+        Output("profiles", "figure", allow_duplicate=True),
+        Output("readout", "children", allow_duplicate=True),
+        Output("clock", "children", allow_duplicate=True),
+        Input("scrub", "value"),
+        State("tick", "disabled"),
+        prevent_initial_call=True,
+    )
+    def _seek(value, disabled):
+        if state.flight is None or not disabled:
+            return (no_update,) * 4
+        state.cur_time = float(value or 0.0)
+        return _frame_updates(state, state.index_at(state.cur_time))
 
-        pp = Patch()
-        tmin = float(f.t[idx] / 60.0)
-        pp["data"][1]["x"] = [tmin]
-        pp["data"][1]["y"] = [float(f.alt[idx])]
-        pp["data"][3]["x"] = [tmin]
-        pp["data"][3]["y"] = [float(f.gs[idx])]
+    # Follow toggle: on -> zoom in and track the aircraft; off -> leave the map
+    # entirely to the user (fully interactive) and refit to the whole flight.
+    @app.callback(
+        Output("map", "figure", allow_duplicate=True),
+        Input("follow", "value"),
+        prevent_initial_call=True,
+    )
+    def _follow(value):
+        f = state.flight
+        if f is None:
+            return no_update
+        state.follow = bool(value) and "on" in value
+        idx = state.index_at(state.cur_time)
+        p = Patch()
+        if state.follow:
+            p["layout"]["map"]["center"] = {"lat": float(f.lat[idx]), "lon": float(f.lon[idx])}
+            p["layout"]["map"]["zoom"] = config.follow_zoom
+        else:
+            lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
+            p["layout"]["map"]["center"] = {
+                "lat": float(np.mean(lat_lim)), "lon": float(np.mean(lon_lim))}
+            p["layout"]["map"]["zoom"] = _zoom_for(lat_lim, lon_lim)
+        return p
 
-        clock = f"{format_duration(f.t[idx])} / {format_duration(f.t[-1])}"
-        return mp, pp, _readout_children(f, idx), clock
-
-    # Basemap style change -> rebuild the map figure at the current position.
+    # Basemap style change: patch just the style so the current view is kept.
     @app.callback(
         Output("map", "figure", allow_duplicate=True),
         Input("basemap", "value"),
-        State("scrub", "value"),
         prevent_initial_call=True,
     )
-    def _basemap(style, value):
+    def _basemap(style):
         if state.flight is None:
             return no_update
         state.style = style
-        idx = int(np.searchsorted(state.flight.t, value or 0.0, side="right")) - 1
-        return _map_figure(state, max(0, min(state.flight.n - 1, idx)))
+        p = Patch()
+        p["layout"]["map"]["style"] = style
+        return p
 
     # Upload a new CSV -> reload everything.
     @app.callback(

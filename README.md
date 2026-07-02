@@ -21,7 +21,7 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 
 - **Interactive world map** (Plotly / MapLibre) — pan/zoom, switchable token-free
   basemaps, flight path colored by altitude with a colorbar.
-- **Animated marker + amber tracer** driven by a master playback clock.
+- **Animated marker + cyan tracer** driven by a master playback clock.
 - **KPI cards** — distance, duration, samples, data rate, max/cruise altitude,
   max/avg speed, max climb/descent.
 - **Live readout** — time, position, altitude, ground speed, heading (with

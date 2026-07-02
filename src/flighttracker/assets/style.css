@@ -1,12 +1,13 @@
-/* Enterprise dark theme for the Flight Path Tracker dashboard. */
+/* General Atomics-style theme for the Flight Path Tracker dashboard. */
 :root {
-    --bg: #0E1116;
-    --panel: #161B22;
-    --panel-2: #1C2230;
-    --border: #2A313C;
-    --text: #E6EDF3;
-    --muted: #9FB0C0;
-    --accent: #FFD133;
+    --bg: #0A1526;
+    --panel: #101E38;
+    --panel-2: #16294A;
+    --border: #26385C;
+    --text: #EAF1FB;
+    --muted: #8FA3C2;
+    --accent: #2C7BE5;
+    --accent-hi: #3B8EF0;
 }
 
 * { box-sizing: border-box; }
@@ -25,7 +26,7 @@ body {
 
 .app {
     display: grid;
-    grid-template-rows: auto auto 1fr auto;
+    grid-template-rows: 48px auto 1fr 64px;
     gap: 10px;
     height: 100vh;
     padding: 10px 14px;
@@ -36,16 +37,17 @@ body {
     display: flex;
     align-items: center;
     gap: 16px;
-    padding: 6px 4px;
+    padding: 4px 4px 8px;
     border-bottom: 1px solid var(--border);
 }
 .title {
     font-size: 20px;
     font-weight: 700;
-    letter-spacing: 0.06em;
-    color: var(--accent);
+    letter-spacing: 0.08em;
+    color: var(--text);
     white-space: nowrap;
 }
+.title::first-letter { color: var(--accent-hi); }
 .file-label {
     color: var(--muted);
     font-size: 13px;
@@ -59,7 +61,8 @@ body {
     align-items: center;
     gap: 12px;
 }
-.follow { color: var(--muted); }
+.follow { color: var(--muted); white-space: nowrap; }
+.follow label { cursor: pointer; }
 .upload {
     border: 1px dashed var(--border);
     border-radius: 6px;
@@ -79,6 +82,7 @@ body {
 .kpi {
     background: var(--panel);
     border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
     border-radius: 8px;
     padding: 8px 12px;
 }
@@ -92,6 +96,7 @@ body {
     font-size: 18px;
     font-weight: 700;
     margin-top: 2px;
+    color: var(--text);
 }
 
 /* Main area */
@@ -123,10 +128,10 @@ body {
     padding: 10px 12px;
 }
 .panel-title {
-    color: var(--accent);
+    color: var(--accent-hi);
     font-weight: 700;
     font-size: 12px;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.10em;
     margin-bottom: 8px;
 }
 .readout { display: grid; gap: 5px; }
@@ -137,7 +142,7 @@ body {
     padding-bottom: 4px;
 }
 .rd-label { color: var(--muted); }
-.rd-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+.rd-value { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
 .profiles {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -148,24 +153,24 @@ body {
 /* Controls */
 .controls {
     display: grid;
-    grid-template-columns: 120px 90px 1fr 190px;
+    grid-template-columns: 120px 96px 1fr 190px;
     align-items: center;
-    gap: 14px;
+    gap: 16px;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 10px 16px;
+    padding: 0 18px;
 }
 .play {
     background: var(--accent);
-    color: #10141b;
+    color: #FFFFFF;
     border: none;
     border-radius: 6px;
     font-weight: 700;
-    padding: 8px 10px;
+    padding: 9px 10px;
     cursor: pointer;
 }
-.play:hover { filter: brightness(1.08); }
+.play:hover { background: var(--accent-hi); }
 .clock {
     text-align: center;
     font-weight: 700;
@@ -173,15 +178,57 @@ body {
     color: var(--text);
 }
 
-/* Dropdowns (Dash renders react-select) tuned for the dark theme. */
-.dd .Select-control,
-.dd .Select-menu-outer,
-.dd div[class*="control"],
-.dd div[class*="menu"] {
+/* dcc.Dropdown (Dash 4 / Radix) — force the dark theme so text is readable. */
+.dash-dropdown {
     background-color: var(--panel-2) !important;
-    border-color: var(--border) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text) !important;
+    border-radius: 6px;
+}
+.dash-dropdown .dash-dropdown-value,
+.dash-dropdown .dash-dropdown-value-item,
+.dash-dropdown .dash-dropdown-value-item span,
+.dash-dropdown .dash-dropdown-placeholder { color: var(--text) !important; }
+
+/* The dropdown menu is portaled to <body>, so style it globally. */
+.dash-dropdown-content {
+    background-color: var(--panel-2) !important;
+    border: 1px solid var(--border) !important;
     color: var(--text) !important;
 }
-.dd div[class*="singleValue"],
-.dd div[class*="option"],
-.dd .Select-value-label { color: var(--text) !important; }
+.dash-dropdown-content .dash-options-list-option,
+.dash-dropdown-content .dash-options-list-option-text span { color: var(--text) !important; }
+.dash-dropdown-content .dash-options-list-option:hover,
+.dash-dropdown-content .dash-options-list-option.selected,
+.dash-dropdown-content .dash-options-list-option[aria-selected="true"] {
+    background-color: var(--accent) !important;
+    color: #fff !important;
+}
+.dash-dropdown-content input {
+    background-color: var(--panel) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text) !important;
+}
+.dash-dropdown-content input::placeholder { color: var(--muted) !important; }
+
+/* dcc.Checklist (Follow) */
+.dash-checklist .dash-options-list-option-text span { color: var(--muted); }
+.dash-checklist .dash-options-list-option { border: none; }
+
+/* dcc.Slider (Dash 4 / Radix) — GA blue, stable on hover, no stray input box. */
+.dash-slider-container > input,
+.dash-range-slider-input { display: none !important; }
+.dash-slider-container { padding: 0 6px; }
+.dash-slider-track { background-color: var(--panel-2) !important; }
+.dash-slider-range { background-color: var(--accent) !important; }
+.dash-slider-thumb {
+    background-color: var(--accent-hi) !important;
+    border: 2px solid #ffffff !important;
+    box-shadow: none !important;
+}
+.dash-slider-thumb:hover,
+.dash-slider-thumb:focus,
+.dash-slider-thumb:focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 4px rgba(59, 142, 240, 0.35) !important;
+}
