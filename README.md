@@ -6,9 +6,9 @@
 
 An interactive dashboard for replaying an aircraft's flight path over a world map
 from a text log of **latitude / longitude / altitude** data. It draws the full
-track colored by altitude, animates a moving aircraft marker with a trailing
-**tracer**, and shows live and summary flight information alongside altitude and
-speed profiles — all in a clean, dark, enterprise-style web UI.
+track colored by altitude, animates the aircraft smoothly along the trajectory,
+and shows live and summary flight information alongside altitude and speed
+profiles — all in a clean, dark, enterprise-style web UI.
 
 Built with a **minimal, mainstream** stack: `dash`, `plotly`, `pandas`, `numpy`.
 Units are aviation-standard: **feet**, **knots**, **nautical miles**.
@@ -21,7 +21,10 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 
 - **Interactive world map** (Plotly / MapLibre) — pan/zoom, switchable token-free
   basemaps, flight path colored by altitude with a colorbar.
-- **Animated marker + cyan tracer** driven by a master playback clock.
+- **Smooth aircraft tracking** — the vehicle state (position, altitude, speed,
+  heading) is interpolated between samples every frame, so the marker glides
+  along the trajectory at any data rate; **Follow** mode turns the map into a
+  chase camera that tracks the aircraft.
 - **KPI cards** — distance, duration, samples, data rate, max/cruise altitude,
   max/avg speed, max climb/descent.
 - **Live readout** — time, position, altitude, ground speed, heading (with
@@ -29,9 +32,11 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 - **Altitude & speed profiles** with a cursor synced to playback.
 - **Playback controls** — play/pause, speed multiplier (1×–500×), and a scrubber.
 - **Drag-and-drop CSV upload** to load a different log at runtime.
-- **Scales to millions of points** — the static path is decimated for display,
-  and playback updates only the marker/tracer/cursor via `dash.Patch`, advancing
-  by real elapsed time so dense logs skip frames instead of crawling.
+- **Scales to millions of points** — the path is decimated to two display
+  budgets (a cheap ground-track polyline plus a sparse altitude-colored
+  overlay; it does not draw every point), and playback patches only the
+  aircraft marker and cursors via `dash.Patch`, advancing by real elapsed time
+  so dense logs skip frames instead of crawling.
 
 ## Quickstart
 

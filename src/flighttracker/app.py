@@ -1,14 +1,19 @@
 """Dash + Plotly dashboard for replaying a flight path.
 
 Builds an enterprise-style dark dashboard: KPI cards, an interactive world map
-(altitude-colored path + animated marker and trailing tracer), synced
-altitude/speed profiles, and playback controls (play/pause, speed, scrubber).
+(altitude-colored path + animated aircraft marker), synced altitude/speed
+profiles, and playback controls (play/pause, speed, scrubber).
 
-Performance: the full :class:`FlightData` is held server-side; the static path is
-decimated to a display budget; each animation tick advances a master clock (the
-scrubber) and updates only the marker/tracer/cursor/readouts via ``dash.Patch``
-— the full path is never re-sent. This mirrors the real-time, frame-skipping
-playback of the original MATLAB app so dense logs stay smooth.
+Performance model
+-----------------
+The full :class:`FlightData` is held server-side. The static path is decimated
+once to two level-of-detail budgets -- a cheap polyline for the ground track and
+a much sparser altitude-colored marker overlay -- so even multi-million-point
+logs render instantly and pan/zoom stays fluid. Each animation tick advances a
+wall-clock-anchored playback clock, **interpolates the aircraft state between
+samples** (position, altitude, speed, heading), and patches only the marker,
+profile cursors and readouts via ``dash.Patch`` -- the path is never re-sent.
+With Follow enabled the map center glides along the interpolated trajectory.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from .data import load_flight_data
 from .metrics import FlightData, compass_point, format_duration
 
 # Map trace indices (order matters for Patch updates).
-_BASE, _ALT, _TRACER, _MARKER = 0, 1, 2, 3
+_LINE, _COLOR, _HALO, _DOT = 0, 1, 2, 3
 
 
 def _decimate(n: int, budget: int) -> np.ndarray:
@@ -65,66 +70,88 @@ class _State:
         if flight is None:
             return
         c = self.config
-        d = _decimate(flight.n, c.display_budget)
-        self.disp_lat = flight.lat[d]
-        self.disp_lon = flight.lon[d]
-        self.disp_alt = flight.alt[d]
-        p = _decimate(flight.n, c.profile_budget)
-        self.prof_t = flight.t[p] / 60.0
-        self.prof_alt = flight.alt[p]
-        self.prof_gs = flight.gs[p]
-        self.tracer_sec = max(c.tracer_min_seconds, c.tracer_fraction * flight.summary.duration_s)
+        li = _decimate(flight.n, c.path_line_budget)
+        self.line_lat = flight.lat[li]
+        self.line_lon = flight.lon[li]
+        mi = _decimate(flight.n, c.path_marker_budget)
+        self.mark_lat = flight.lat[mi]
+        self.mark_lon = flight.lon[mi]
+        self.mark_alt = flight.alt[mi]
+        pi = _decimate(flight.n, c.profile_budget)
+        self.prof_t = flight.t[pi] / 60.0
+        self.prof_alt = flight.alt[pi]
+        self.prof_gs = flight.gs[pi]
 
-    def index_at(self, t: float) -> int:
-        """Sample index at data-time ``t`` seconds (clamped)."""
-        f = self.flight
-        idx = int(np.searchsorted(f.t, t, side="right")) - 1
-        return max(0, min(f.n - 1, idx))
+    def sample_at(self, t: float) -> dict:
+        """Aircraft state at data-time ``t``, interpolated between samples.
 
-    def tracer_slice(self, idx: int) -> tuple[np.ndarray, np.ndarray]:
+        Sub-sample interpolation keeps the marker (and Follow camera) moving
+        smoothly along the trajectory regardless of the log's data rate.
+        """
         f = self.flight
-        start = int(np.searchsorted(f.t, f.t[idx] - self.tracer_sec, side="left"))
-        sl = slice(start, idx + 1)
-        lat = f.lat[sl]
-        lon = f.lon[sl]
-        if lat.size > self.config.tracer_budget:
-            k = np.linspace(0, lat.size - 1, self.config.tracer_budget).astype(int)
-            lat, lon = lat[k], lon[k]
-        return lat, lon
+        tt = float(np.clip(t, f.t[0], f.t[-1]))
+        i = int(np.searchsorted(f.t, tt, side="right")) - 1
+        i = max(0, min(f.n - 2, i))
+        j = i + 1
+        dt = float(f.t[j] - f.t[i])
+        w = 0.0 if dt <= 0 else (tt - float(f.t[i])) / dt
+
+        def lerp(a: np.ndarray) -> float:
+            return float(a[i] + (a[j] - a[i]) * w)
+
+        # Heading interpolates along the shortest angular arc (359 -> 1 != 180).
+        dh = ((float(f.hdg[j]) - float(f.hdg[i]) + 180.0) % 360.0) - 180.0
+        return {
+            "t": tt,
+            "lat": lerp(f.lat),
+            "lon": lerp(f.lon),
+            "alt": lerp(f.alt),
+            "gs": lerp(f.gs),
+            "vs": lerp(f.vs),
+            "dist": lerp(f.cum_nm),
+            "hdg": (float(f.hdg[i]) + dh * w) % 360.0,
+        }
 
 
 # --------------------------------------------------------------------------- #
 #  Figure builders
 # --------------------------------------------------------------------------- #
-def _map_figure(state: _State, idx: int = 0) -> go.Figure:
+def _map_figure(state: _State, s: dict | None = None) -> go.Figure:
     f = state.flight
     c = state.config
-    tr_lat, tr_lon = state.tracer_slice(idx)
+    s = s or state.sample_at(0.0)
     fig = go.Figure()
     fig.add_trace(go.Scattermap(
-        lat=state.disp_lat, lon=state.disp_lon, mode="lines",
-        line=dict(width=1, color="rgba(255,255,255,0.25)"),
-        hoverinfo="skip", name="path",
+        lat=state.line_lat, lon=state.line_lon, mode="lines",
+        line=dict(width=1.5, color="rgba(255,255,255,0.20)"),
+        hoverinfo="skip", name="track",
     ))
     fig.add_trace(go.Scattermap(
-        lat=state.disp_lat, lon=state.disp_lon, mode="markers",
-        marker=dict(size=6, color=state.disp_alt, colorscale=c.colorscale,
+        lat=state.mark_lat, lon=state.mark_lon, mode="markers",
+        marker=dict(size=5, color=state.mark_alt, colorscale=c.colorscale,
                     showscale=True,
-                    colorbar=dict(title="Alt (ft)", x=0.99, thickness=12,
-                                  tickfont=dict(color=c.text), title_font=dict(color=c.text))),
-        hoverinfo="skip", name="altitude",
+                    colorbar=dict(
+                        title=dict(text="ALT (FT)", font=dict(color=c.muted, size=10)),
+                        tickfont=dict(color=c.muted, size=9),
+                        thickness=8, len=0.7, x=0.99, xanchor="right",
+                        y=0.98, yanchor="top", outlinewidth=0, ticklen=3,
+                        bgcolor="rgba(10,21,38,0.55)",
+                    )),
+        customdata=state.mark_alt,
+        hovertemplate="%{customdata:,.0f} ft<extra></extra>",
+        name="altitude",
     ))
     fig.add_trace(go.Scattermap(
-        lat=tr_lat, lon=tr_lon, mode="lines",
-        line=dict(width=4, color=c.tracer_color), hoverinfo="skip", name="tracer",
+        lat=[s["lat"]], lon=[s["lon"]], mode="markers",
+        marker=dict(size=24, color=c.halo), hoverinfo="skip", name="halo",
     ))
     fig.add_trace(go.Scattermap(
-        lat=[f.lat[idx]], lon=[f.lon[idx]], mode="markers",
-        marker=dict(size=14, color=c.cursor), hoverinfo="skip", name="aircraft",
+        lat=[s["lat"]], lon=[s["lon"]], mode="markers",
+        marker=dict(size=11, color=c.cursor), hoverinfo="skip", name="aircraft",
     ))
     lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
     if state.follow:
-        center = dict(lat=float(f.lat[idx]), lon=float(f.lon[idx]))
+        center = dict(lat=s["lat"], lon=s["lon"])
         zoom = c.follow_zoom
     else:
         center = dict(lat=float(np.mean(lat_lim)), lon=float(np.mean(lon_lim)))
@@ -145,26 +172,33 @@ def _zoom_for(lat_lim, lon_lim) -> float:
     return float(max(1.0, min(16.0, z)))
 
 
-def _profiles_figure(state: _State, idx: int = 0) -> go.Figure:
-    f = state.flight
+def _profiles_figure(state: _State, s: dict | None = None) -> go.Figure:
     c = state.config
-    cm = dict(color=c.cursor, size=9, line=dict(color=c.accent, width=2))
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
-                        subplot_titles=("Altitude (ft)", "Ground speed (kt)"))
+    s = s or state.sample_at(0.0)
+    cm = dict(color=c.cursor, size=8, line=dict(color=c.accent, width=2))
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.16,
+                        subplot_titles=("ALTITUDE (FT)", "GROUND SPEED (KT)"))
     fig.add_trace(go.Scatter(x=state.prof_t, y=state.prof_alt, mode="lines",
-                             line=dict(color=c.color_alt, width=1.6), hoverinfo="skip"),
+                             line=dict(color=c.color_alt, width=1.5), hoverinfo="skip"),
                   row=1, col=1)
-    fig.add_trace(go.Scatter(x=[f.t[idx] / 60.0], y=[f.alt[idx]], mode="markers",
+    fig.add_trace(go.Scatter(x=[s["t"] / 60.0], y=[s["alt"]], mode="markers",
                              marker=cm, hoverinfo="skip"), row=1, col=1)
     fig.add_trace(go.Scatter(x=state.prof_t, y=state.prof_gs, mode="lines",
-                             line=dict(color=c.color_speed, width=1.6), hoverinfo="skip"),
+                             line=dict(color=c.color_speed, width=1.5), hoverinfo="skip"),
                   row=2, col=1)
-    fig.add_trace(go.Scatter(x=[f.t[idx] / 60.0], y=[f.gs[idx]], mode="markers",
+    fig.add_trace(go.Scatter(x=[s["t"] / 60.0], y=[s["gs"]], mode="markers",
                              marker=cm, hoverinfo="skip"), row=2, col=1)
-    fig.update_xaxes(title_text="Time (min)", row=2, col=1)
+    fig.update_xaxes(gridcolor=c.grid, zeroline=False, tickfont=dict(size=10))
+    fig.update_yaxes(gridcolor=c.grid, zeroline=False, tickfont=dict(size=10))
+    fig.update_xaxes(title_text="TIME (MIN)", title_font=dict(size=10, color=c.muted),
+                     row=2, col=1)
+    for ann in fig.layout.annotations:
+        ann.font = dict(size=10, color=c.muted)
+        ann.x = 0.0
+        ann.xanchor = "left"
     fig.update_layout(
         template="plotly_dark", showlegend=False,
-        margin=dict(l=48, r=16, t=28, b=36),
+        margin=dict(l=46, r=14, t=24, b=34),
         paper_bgcolor=c.panel, plot_bgcolor=c.panel, font=dict(color=c.muted),
         height=300, uirevision="keep",
     )
@@ -189,22 +223,22 @@ def _kpi_children(f: FlightData) -> list:
     ]) for label, value in cards]
 
 
-def _time_str(f: FlightData, idx: int) -> str:
+def _time_str(f: FlightData, t: float) -> str:
     if f.t0 is None:
-        return format_duration(f.t[idx])
+        return format_duration(t)
     from datetime import timedelta
-    return (f.t0 + timedelta(seconds=float(f.t[idx]))).strftime("%Y-%m-%d %H:%M:%S")
+    return (f.t0 + timedelta(seconds=float(t))).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _readout_children(f: FlightData, idx: int) -> list:
+def _readout_children(f: FlightData, s: dict) -> list:
     rows = [
-        ("Time", _time_str(f, idx)),
-        ("Position", f"{f.lat[idx]:.4f}°, {f.lon[idx]:.4f}°"),
-        ("Altitude", f"{_fmt_int(f.alt[idx])} ft"),
-        ("Ground speed", f"{f.gs[idx]:.0f} kt"),
-        ("Heading", f"{f.hdg[idx]:03.0f}°  {compass_point(f.hdg[idx])}"),
-        ("Vertical speed", f"{_fmt_int(f.vs[idx])} ft/min"),
-        ("Distance flown", f"{f.cum_nm[idx]:.1f} nm"),
+        ("Time", _time_str(f, s["t"])),
+        ("Position", f"{s['lat']:.4f}°, {s['lon']:.4f}°"),
+        ("Altitude", f"{_fmt_int(s['alt'])} ft"),
+        ("Ground speed", f"{s['gs']:.0f} kt"),
+        ("Heading", f"{s['hdg']:03.0f}°  {compass_point(s['hdg'])}"),
+        ("Vertical speed", f"{_fmt_int(s['vs'])} ft/min"),
+        ("Distance flown", f"{s['dist']:.1f} nm"),
     ]
     return [html.Div(className="rd-row", children=[
         html.Span(label, className="rd-label"),
@@ -228,20 +262,27 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
 
     file_label = Path(flight.file).name if flight and flight.file else "no file loaded"
     t_max = float(flight.t[-1]) if flight else 1.0
+    s0 = state.sample_at(0.0) if flight else None
 
     app.layout = html.Div(className="app", children=[
         # Header
         html.Div(className="header", children=[
-            html.Div("✈  FLIGHT PATH TRACKER", className="title"),
-            html.Div(id="file-label", className="file-label", children=file_label),
+            html.Div(className="brand", children=[
+                html.Div("✈", className="brand-mark"),
+                html.Div(children=[
+                    html.Div("FLIGHT PATH TRACKER", className="title"),
+                    html.Div("TELEMETRY REPLAY CONSOLE", className="subtitle"),
+                ]),
+            ]),
+            html.Div(id="file-label", className="chip", children=file_label),
             html.Div(className="header-controls", children=[
                 dcc.Dropdown(id="basemap", className="dd",
                              options=[{"label": s, "value": s} for s in config.basemap_styles],
                              value=config.default_style, clearable=False),
                 dcc.Checklist(id="follow", className="follow",
-                              options=[{"label": " Follow", "value": "on"}], value=[]),
+                              options=[{"label": "FOLLOW", "value": "on"}], value=[]),
                 dcc.Upload(id="upload", className="upload",
-                           children=html.Div("⬆ Load CSV"), multiple=False),
+                           children=html.Div("⬆ LOAD CSV"), multiple=False),
             ]),
         ]),
 
@@ -254,27 +295,28 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             html.Div(className="map-wrap", children=[
                 dcc.Graph(id="map", className="map",
                           config={"displayModeBar": False, "scrollZoom": True},
-                          figure=_map_figure(state) if flight else go.Figure()),
+                          figure=_map_figure(state, s0) if flight else go.Figure()),
             ]),
             html.Div(className="side", children=[
                 html.Div(className="panel", children=[
-                    html.Div("LIVE", className="panel-title"),
+                    html.Div("LIVE TELEMETRY", className="panel-title"),
                     html.Div(id="readout", className="readout",
-                             children=_readout_children(flight, 0) if flight else []),
+                             children=_readout_children(flight, s0) if flight else []),
                 ]),
-                dcc.Graph(id="profiles", className="profiles", config={"displayModeBar": False},
-                          figure=_profiles_figure(state) if flight else go.Figure()),
+                dcc.Graph(id="profiles", className="profiles",
+                          config={"displayModeBar": False},
+                          figure=_profiles_figure(state, s0) if flight else go.Figure()),
             ]),
         ]),
 
         # Controls
         html.Div(className="controls", children=[
-            html.Button("▶  Play", id="play", className="play"),
+            html.Button("▶  PLAY", id="play", className="play"),
             dcc.Dropdown(id="speed", className="dd speed", clearable=False,
                          options=[{"label": f"{m}×", "value": m} for m in config.speed_multipliers],
                          value=25),
             dcc.Slider(id="scrub", min=0, max=t_max, value=0,
-                       step=max(0.1, round(t_max / 1000.0, 2)),
+                       step=max(0.1, round(t_max / 2000.0, 2)),
                        marks=None, updatemode="drag", included=True),
             html.Div(id="clock", className="clock", children="00:00:00 / 00:00:00"),
         ]),
@@ -286,31 +328,31 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
     return app
 
 
-def _frame_updates(state: _State, idx: int):
+def _frame_updates(state: _State, s: dict):
     """Build the per-frame Patch updates (map, profiles) + readout + clock.
 
-    Only trace data is patched (and the map center, when Follow is on), so the
-    user's pan/zoom is preserved and the map stays interactive during playback.
+    Only the aircraft marker is patched (and the map center, when Follow is
+    on), so the user's pan/zoom is preserved and the map stays interactive
+    during playback.
     """
     f = state.flight
     mp = Patch()
-    tr_lat, tr_lon = state.tracer_slice(idx)
-    mp["data"][_TRACER]["lat"] = tr_lat.tolist()
-    mp["data"][_TRACER]["lon"] = tr_lon.tolist()
-    mp["data"][_MARKER]["lat"] = [float(f.lat[idx])]
-    mp["data"][_MARKER]["lon"] = [float(f.lon[idx])]
+    mp["data"][_HALO]["lat"] = [s["lat"]]
+    mp["data"][_HALO]["lon"] = [s["lon"]]
+    mp["data"][_DOT]["lat"] = [s["lat"]]
+    mp["data"][_DOT]["lon"] = [s["lon"]]
     if state.follow:
-        mp["layout"]["map"]["center"] = {"lat": float(f.lat[idx]), "lon": float(f.lon[idx])}
+        mp["layout"]["map"]["center"] = {"lat": s["lat"], "lon": s["lon"]}
 
     pp = Patch()
-    tmin = float(f.t[idx] / 60.0)
+    tmin = s["t"] / 60.0
     pp["data"][1]["x"] = [tmin]
-    pp["data"][1]["y"] = [float(f.alt[idx])]
+    pp["data"][1]["y"] = [s["alt"]]
     pp["data"][3]["x"] = [tmin]
-    pp["data"][3]["y"] = [float(f.gs[idx])]
+    pp["data"][3]["y"] = [s["gs"]]
 
-    clock = f"{format_duration(f.t[idx])} / {format_duration(f.t[-1])}"
-    return mp, pp, _readout_children(f, idx), clock
+    clock = f"{format_duration(s['t'])} / {format_duration(f.t[-1])}"
+    return mp, pp, _readout_children(f, s), clock
 
 
 def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
@@ -343,10 +385,10 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         if ended:
             data_t = float(f.t[-1])
         state.cur_time = data_t
-        idx = state.index_at(data_t)
-        mp, pp, ro, clock = _frame_updates(state, idx)
+        s = state.sample_at(data_t)
+        mp, pp, ro, clock = _frame_updates(state, s)
         disabled = True if ended else no_update
-        label = "▶  Play" if ended else no_update
+        label = "▶  PLAY" if ended else no_update
         return data_t, mp, pp, ro, clock, disabled, label
 
     # Play / pause. Starting (re)anchors the clock; restarts from 0 when at end.
@@ -364,14 +406,14 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
             return no_update, no_update, no_update
         if not disabled:  # currently playing -> pause
             state.cur_time = value or 0.0
-            return True, "▶  Play", no_update
+            return True, "▶  PLAY", no_update
         at_end = (value or 0.0) >= f.t[-1]
         start_t = 0.0 if at_end else float(value or 0.0)
         state.cur_time = start_t
         state.anchor_data = start_t
         state.anchor_wall = time.monotonic()
         state.last_speed = None
-        return False, "❚❚  Pause", (0.0 if at_end else no_update)
+        return False, "❚❚  PAUSE", (0.0 if at_end else no_update)
 
     # Manual scrub (only while paused; during playback the tick owns updates).
     @app.callback(
@@ -387,7 +429,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         if state.flight is None or not disabled:
             return (no_update,) * 4
         state.cur_time = float(value or 0.0)
-        return _frame_updates(state, state.index_at(state.cur_time))
+        return _frame_updates(state, state.sample_at(state.cur_time))
 
     # Follow toggle: on -> zoom in and track the aircraft; off -> leave the map
     # entirely to the user (fully interactive) and refit to the whole flight.
@@ -401,10 +443,10 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         if f is None:
             return no_update
         state.follow = bool(value) and "on" in value
-        idx = state.index_at(state.cur_time)
+        s = state.sample_at(state.cur_time)
         p = Patch()
         if state.follow:
-            p["layout"]["map"]["center"] = {"lat": float(f.lat[idx]), "lon": float(f.lon[idx])}
+            p["layout"]["map"]["center"] = {"lat": s["lat"], "lon": s["lon"]}
             p["layout"]["map"]["zoom"] = config.follow_zoom
         else:
             lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
@@ -434,6 +476,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         Output("kpis", "children"),
         Output("file-label", "children"),
         Output("scrub", "max"),
+        Output("scrub", "step"),
         Output("scrub", "value", allow_duplicate=True),
         Output("tick", "disabled", allow_duplicate=True),
         Output("play", "children", allow_duplicate=True),
@@ -443,7 +486,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
     )
     def _upload(contents, filename):
         if not contents:
-            return (no_update,) * 8
+            return (no_update,) * 9
         _, b64 = contents.split(",", 1)
         raw = base64.b64decode(b64)
         with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as tmp:
@@ -453,13 +496,15 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
             flight = load_flight_data(tmp_path)
         except Exception as exc:  # noqa: BLE001 - surface parse errors to the UI
             return (no_update, no_update, no_update, f"⚠ {filename}: {exc}",
-                    no_update, no_update, no_update, no_update)
+                    no_update, no_update, no_update, no_update, no_update)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
         flight.file = filename or "uploaded.csv"
         state.set_flight(flight)
+        t_max = float(flight.t[-1])
         return (_map_figure(state), _profiles_figure(state), _kpi_children(flight),
-                filename, float(flight.t[-1]), 0.0, True, "▶  Play")
+                filename, t_max, max(0.1, round(t_max / 2000.0, 2)), 0.0,
+                True, "▶  PLAY")
 
 
 def run(flight: FlightData | None = None, config: AppConfig | None = None,

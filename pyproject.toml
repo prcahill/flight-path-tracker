@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flight-path-tracker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Interactive dashboard to replay aircraft flight paths from lat/lon/altitude logs."
 readme = "README.md"
 requires-python = ">=3.10"

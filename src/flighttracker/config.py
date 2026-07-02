@@ -26,17 +26,16 @@ SPEED_MULTIPLIERS: tuple[int, ...] = (1, 5, 25, 100, 500)
 class AppConfig:
     """Immutable configuration for the dashboard."""
 
-    # Performance / level-of-detail budgets (max points actually drawn).
-    display_budget: int = 30_000   # static altitude-colored path
-    tracer_budget: int = 1_500     # trailing tracer polyline
-    profile_budget: int = 8_000    # altitude / speed mini-charts
+    # Level-of-detail budgets (max points actually drawn). The flight path is
+    # rendered as a cheap polyline plus a much sparser altitude-colored marker
+    # overlay -- large logs are decimated to these budgets, never re-sent.
+    path_line_budget: int = 20_000    # ground-track polyline
+    path_marker_budget: int = 4_000   # altitude-colored marker overlay
+    profile_budget: int = 6_000       # altitude / speed mini-charts
 
-    # Animation cadence (ms). Playback is timed off the wall clock.
-    interval_ms: int = 100
-
-    # Trailing tracer window as a fraction of total flight duration.
-    tracer_fraction: float = 0.04
-    tracer_min_seconds: float = 60.0
+    # Animation cadence (ms). Playback is timed off the wall clock and the
+    # aircraft position is interpolated between samples each tick.
+    interval_ms: int = 80
 
     # Theme colors (General Atomics-style navy / blue).
     bg: str = "#0A1526"            # app background
@@ -46,16 +45,17 @@ class AppConfig:
     text: str = "#EAF1FB"
     muted: str = "#8FA3C2"
     accent: str = "#2C7BE5"        # GA blue: buttons, highlights
-    tracer_color: str = "#26C6FF"  # bright cyan tracer (pops on dark map)
+    halo: str = "rgba(44,123,229,0.38)"  # soft ring under the aircraft marker
     cursor: str = "#FFFFFF"        # chart cursor dots + aircraft marker
     color_alt: str = "#5AA9FF"     # altitude trace
     color_speed: str = "#8FE388"   # speed trace
+    grid: str = "#1C2E52"          # chart grid lines
 
     colorscale: str = "Turbo"      # altitude color map
 
     # Map.
     default_style: str = "carto-darkmatter"
-    follow_zoom: float = 8.0       # zoom level used when "Follow" is on
+    follow_zoom: float = 8.5       # zoom level used when "Follow" is on
     basemap_styles: tuple[str, ...] = field(default_factory=lambda: BASEMAP_STYLES)
     speed_multipliers: tuple[int, ...] = field(default_factory=lambda: SPEED_MULTIPLIERS)
 
