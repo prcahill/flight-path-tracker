@@ -12,11 +12,12 @@ a much sparser altitude-colored marker overlay -- so even multi-million-point
 logs render instantly and pan/zoom stays fluid. Each animation tick advances a
 wall-clock-anchored playback clock, **interpolates the aircraft state between
 samples** (position, altitude, speed, heading), and ships the frame to the
-browser through a ``dcc.Store``; a clientside callback applies it with
-``Plotly.restyle`` so the map is never re-rendered on the hot path -- the user
-can pan and zoom freely while playback is running. Profile cursors and readouts
-update via ``dash.Patch``; the path itself is never re-sent. With Follow
-enabled the map center glides along the interpolated trajectory.
+browser through a ``dcc.Store``; a clientside callback writes the position
+straight into the MapLibre GeoJSON sources (``setData``), bypassing Plotly's
+update pipeline entirely -- zero camera calls on the hot path, so the user can
+grab, pan and zoom the map freely while playback is running. Profile cursors
+and readouts update via ``dash.Patch``; the path itself is never re-sent. With
+Follow enabled the camera glides along the interpolated trajectory.
 """
 
 from __future__ import annotations
@@ -373,26 +374,56 @@ def _patch_marker(p: Patch, s: dict) -> Patch:
 
 
 def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
-    # Apply each frame client-side: restyle only the halo/dot traces (no map
-    # re-render, so an in-progress drag survives), and in Follow mode glide
-    # the camera along with the aircraft.
+    # Apply each frame client-side by writing the aircraft position straight
+    # into the MapLibre GeoJSON sources of the halo/dot traces. This bypasses
+    # Plotly's update pipeline entirely: measured against Plotly.restyle
+    # (which periodically triggers updateLayout -> setCenter/jumpTo ->
+    # map.stop(), killing any in-progress drag ~5x/sec), direct setData makes
+    # ZERO camera calls, so the map stays fully draggable during playback.
+    # Follow mode drives the camera with map.jumpTo and silently syncs the
+    # figure layout so later figure-level redraws keep the chase-cam view.
     app.clientside_callback(
         """
         function(frame) {
-            if (!frame) { return window.dash_clientside.no_update; }
+            var noop = window.dash_clientside.no_update;
+            if (!frame) { return noop; }
             var el = document.getElementById('map');
             var gd = el && el.querySelector('.js-plotly-plot');
-            if (!gd || !gd.data || gd.data.length < 4) {
-                return window.dash_clientside.no_update;
+            if (!gd || !gd._fullLayout || !gd._fullLayout.map) { return noop; }
+            var sp = gd._fullLayout.map._subplot;
+            var fc = {type: 'FeatureCollection', features: [{type: 'Feature', id: 1,
+                      geometry: {type: 'Point', coordinates: [frame.lon, frame.lat]},
+                      properties: {}}]};
+            var applied = false;
+            if (sp && sp.map && gd._fullData && gd._fullData.length >= 4) {
+                try {
+                    var halo = sp.map.getSource('source-' + gd._fullData[2].uid + '-circle');
+                    var dot = sp.map.getSource('source-' + gd._fullData[3].uid + '-circle');
+                    if (halo && dot) {
+                        halo.setData(fc);
+                        dot.setData(fc);
+                        // keep plotly's trace state consistent so any later
+                        // figure-level redraw does not snap the marker back
+                        gd.data[2].lat = [frame.lat]; gd.data[2].lon = [frame.lon];
+                        gd.data[3].lat = [frame.lat]; gd.data[3].lon = [frame.lon];
+                        applied = true;
+                    }
+                } catch (e) { /* fall through to restyle */ }
             }
-            Plotly.restyle(gd, {
-                lat: [[frame.lat], [frame.lat]],
-                lon: [[frame.lon], [frame.lon]],
-            }, [2, 3]);
-            if (frame.follow) {
-                Plotly.relayout(gd, {'map.center': {lat: frame.lat, lon: frame.lon}});
+            if (!applied) {
+                Plotly.restyle(gd, {
+                    lat: [[frame.lat], [frame.lat]],
+                    lon: [[frame.lon], [frame.lon]],
+                }, [2, 3]);
             }
-            return window.dash_clientside.no_update;
+            if (frame.follow && sp && sp.map) {
+                sp.map.jumpTo({center: [frame.lon, frame.lat]});
+                if (gd.layout.map) {
+                    gd.layout.map.center = {lat: frame.lat, lon: frame.lon};
+                }
+                gd._fullLayout.map.center = {lat: frame.lat, lon: frame.lon};
+            }
+            return noop;
         }
         """,
         Output("frame-ack", "data"),
