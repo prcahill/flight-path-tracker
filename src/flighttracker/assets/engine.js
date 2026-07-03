@@ -236,5 +236,34 @@ window.FT = (function () {
       var g = gd();
       if (g) window.Plotly.relayout(g, {"map.style": style});
     },
+    prepUpload: function (contents, filename, maxRows) {
+      /* Decode a dcc.Upload data-URI and, for very large files, stride-
+       * decimate the rows in the browser so only a few MB ever reach the
+       * server. The app never draws more than the display budgets anyway,
+       * so visualization quality is unaffected. */
+      if (!contents) return null;
+      var name = filename || "uploaded.csv";
+      var text;
+      try {
+        text = atob(contents.split(",", 2)[1]);
+      } catch (e) {
+        return {name: name, err: "could not decode the uploaded file"};
+      }
+      var lines = text.split(/\r?\n/);
+      while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+      var origRows = Math.max(0, lines.length - 1);
+      if (lines.length > maxRows + 1) {
+        var out = [lines[0]];                       // header (or first row)
+        var stride = Math.ceil((lines.length - 1) / maxRows);
+        for (var i = 1; i < lines.length; i += stride) {
+          if (lines[i]) out.push(lines[i]);
+        }
+        var last = lines[lines.length - 1];
+        if (last && out[out.length - 1] !== last) out.push(last);
+        text = out.join("\n");
+        return {name: name, csv: text, orig_rows: origRows, kept_rows: out.length - 1};
+      }
+      return {name: name, csv: lines.join("\n"), orig_rows: origRows, kept_rows: origRows};
+    },
   };
 })();

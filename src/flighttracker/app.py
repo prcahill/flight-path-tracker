@@ -23,7 +23,6 @@ large logs render instantly.
 
 from __future__ import annotations
 
-import base64
 import tempfile
 from pathlib import Path
 
@@ -306,6 +305,9 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         # Client-side playback engine data + dummy ack target.
         dcc.Store(id="engine-data", data=_engine_payload(state) if flight else None),
         dcc.Store(id="cs-ack"),
+        # Upload staging: the browser decodes (and, for very large files,
+        # decimates) the CSV before it is sent to the server for parsing.
+        dcc.Store(id="upload-csv"),
     ])
 
     _register_callbacks(app, state, config)
@@ -349,8 +351,16 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         Input("basemap", "value"),
         prevent_initial_call=True,
     )
+    app.clientside_callback(
+        "function(c, f){ return window.FT ? window.FT.prepUpload(c, f, "
+        f"{config.upload_max_rows}) : null; }}",
+        Output("upload-csv", "data"),
+        Input("upload", "contents"),
+        State("upload", "filename"),
+        prevent_initial_call=True,
+    )
 
-    # ---- server: parse an uploaded CSV and rebuild everything -------------
+    # ---- server: parse a (browser-staged) CSV and rebuild everything ------
     @app.callback(
         Output("map", "figure"),
         Output("profiles", "figure"),
@@ -362,30 +372,37 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         Output("scrub", "value"),
         Output("play", "children", allow_duplicate=True),
         Output("engine-data", "data"),
-        Input("upload", "contents"),
-        State("upload", "filename"),
+        Input("upload-csv", "data"),
         prevent_initial_call=True,
     )
-    def _upload(contents, filename):
-        if not contents:
+    def _upload(staged):
+        if not staged:
             return (no_update,) * 10
-        _, b64 = contents.split(",", 1)
-        raw = base64.b64decode(b64)
-        with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as tmp:
-            tmp.write(raw)
+        name = staged.get("name", "uploaded.csv")
+        if staged.get("err") or not staged.get("csv"):
+            err = staged.get("err", "empty file")
+            return (no_update, no_update, no_update, no_update, f"⚠ {name}: {err}",
+                    no_update, no_update, no_update, no_update, no_update)
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
+                                         encoding="utf-8") as tmp:
+            tmp.write(staged["csv"])
             tmp_path = tmp.name
         try:
             flight = load_flight_data(tmp_path)
         except Exception as exc:  # noqa: BLE001 - surface parse errors to the UI
-            return (no_update, no_update, no_update, no_update, f"⚠ {filename}: {exc}",
+            return (no_update, no_update, no_update, no_update, f"⚠ {name}: {exc}",
                     no_update, no_update, no_update, no_update, no_update)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
-        flight.file = filename or "uploaded.csv"
+        flight.file = name
         state.set_flight(flight)
+        label = name
+        orig, kept = staged.get("orig_rows", 0), staged.get("kept_rows", 0)
+        if orig and kept and kept < orig:
+            label = f"{name} · downsampled {orig:,} → {kept:,} rows"
         t_max = float(flight.t[-1])
         return (_map_figure(state), _profiles_figure(state), _kpi_children(flight),
-                _readout_children(flight), filename, t_max,
+                _readout_children(flight), label, t_max,
                 max(0.1, round(t_max / 2000.0, 2)), 0.0, "▶  PLAY",
                 _engine_payload(state))
 

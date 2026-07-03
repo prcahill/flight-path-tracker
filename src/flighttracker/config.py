@@ -32,6 +32,7 @@ class AppConfig:
     path_line_budget: int = 20_000    # ground-track polyline
     path_marker_budget: int = 4_000   # altitude-colored marker overlay
     engine_budget: int = 6_000        # profiles + client-side playback arrays
+    upload_max_rows: int = 50_000     # larger uploads are decimated in-browser
 
     # Theme colors (General Atomics-style navy / blue).
     bg: str = "#0A1526"            # app background
