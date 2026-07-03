@@ -57,13 +57,22 @@ window.FT = (function () {
     var w = dt > 0 ? (t - d.t[i]) / dt : 0;
     w = Math.max(0, Math.min(1, w));
     var lerp = function (a) { return a[i] + (a[j] - a[i]) * w; };
+    // Optional channels may be absent (null array) or have null entries
+    // where the source had not yet reported them.
+    var lerpOpt = function (a) {
+      if (!a || a[i] == null || a[j] == null) return null;
+      return a[i] + (a[j] - a[i]) * w;
+    };
     var dh = ((d.hdg[j] - d.hdg[i] + 540) % 360) - 180;   // shortest arc
     return {
       t: t, lat: lerp(d.lat), lon: lerp(d.lon), alt: lerp(d.alt),
       gs: lerp(d.gs), vs: lerp(d.vs), dist: lerp(d.dist),
       hdg: ((d.hdg[i] + dh * w) % 360 + 360) % 360,
-      pitch: d.pitch ? lerp(d.pitch) : null,
-      roll: d.roll ? lerp(d.roll) : null,
+      pitch: lerpOpt(d.pitch),
+      roll: lerpOpt(d.roll),
+      slant: lerpOpt(d.slant),
+      fcLat: lerpOpt(d.fc_lat),
+      fcLon: lerpOpt(d.fc_lon),
     };
   }
 
@@ -89,23 +98,104 @@ window.FT = (function () {
   }
 
   // -- rendering ----------------------------------------------------------
+  var EMPTY_FC = {type: "FeatureCollection", features: []};
+
+  function pointFC(lon, lat, props) {
+    return {type: "FeatureCollection", features: [{type: "Feature", id: 1,
+            geometry: {type: "Point", coordinates: [lon, lat]},
+            properties: props || {}}]};
+  }
+
+  function planeImage() {
+    // Plane silhouette pointing north, drawn at 2x for crisp rendering.
+    var cv = document.createElement("canvas");
+    cv.width = 64; cv.height = 64;
+    var ctx = cv.getContext("2d");
+    var pts = [[0,-18],[2.5,-14],[3,-7],[17,3],[17,7],[3.5,4],[2.5,12],[7,16],
+               [7,19],[0,17],[-7,19],[-7,16],[-2.5,12],[-3.5,4],[-17,7],
+               [-17,3],[-3,-7],[-2.5,-14]];
+    ctx.translate(32, 32);
+    ctx.scale(1.5, 1.5);
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = "#FFFFFF";
+    ctx.strokeStyle = "#0A1526";
+    ctx.lineWidth = 2;
+    ctx.fill();
+    ctx.stroke();
+    return ctx.getImageData(0, 0, 64, 64);
+  }
+
+  function ensureAircraftLayer(m) {
+    // Heading-rotated aircraft symbol as a native MapLibre layer. Basemap
+    // changes rebuild the style and drop custom layers, so this re-adds
+    // itself idempotently (a style.load hook triggers the next attempt).
+    try {
+      if (m.getLayer("ft-ac")) return true;
+      if (!m.isStyleLoaded()) return false;
+      if (!m.hasImage("ft-plane")) m.addImage("ft-plane", planeImage(), {pixelRatio: 2});
+      if (!m.getSource("ft-ac-src")) {
+        m.addSource("ft-ac-src", {type: "geojson", data: EMPTY_FC});
+      }
+      m.addLayer({id: "ft-ac", type: "symbol", source: "ft-ac-src",
+        layout: {"icon-image": "ft-plane", "icon-size": 0.72,
+                 "icon-rotate": ["get", "hdg"], "icon-rotation-alignment": "map",
+                 "icon-allow-overlap": true, "icon-ignore-placement": true}});
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function drawStare(g, m, s) {
+    if (g._fullData.length < 6) return;
+    try {
+      var lineSrc = m.getSource("source-" + g._fullData[4].uid + "-line");
+      var ptSrc = m.getSource("source-" + g._fullData[5].uid + "-circle");
+      if (!lineSrc || !ptSrc) return;
+      if (s.fcLat == null || s.fcLon == null) {
+        lineSrc.setData(EMPTY_FC);
+        ptSrc.setData(EMPTY_FC);
+        g.data[4].lat = []; g.data[4].lon = [];
+        g.data[5].lat = []; g.data[5].lon = [];
+        return;
+      }
+      lineSrc.setData({type: "FeatureCollection", features: [{type: "Feature", id: 1,
+        geometry: {type: "LineString",
+                   coordinates: [[s.lon, s.lat], [s.fcLon, s.fcLat]]},
+        properties: {}}]});
+      ptSrc.setData(pointFC(s.fcLon, s.fcLat));
+      g.data[4].lat = [s.lat, s.fcLat]; g.data[4].lon = [s.lon, s.fcLon];
+      g.data[5].lat = [s.fcLat]; g.data[5].lon = [s.fcLon];
+    } catch (e) { /* map still initializing */ }
+  }
+
   function drawMarker(s) {
     var g = gd();
     if (!g || !g._fullData || g._fullData.length < 4) return;
     var m = mapObj();
     if (!m) return;
-    var fc = {type: "FeatureCollection", features: [{type: "Feature", id: 1,
-              geometry: {type: "Point", coordinates: [s.lon, s.lat]}, properties: {}}]};
+    if (!m.__ftStyleHook) {
+      m.__ftStyleHook = true;
+      m.on("style.load", function () { ensureAircraftLayer(m); });
+    }
+    var fc = pointFC(s.lon, s.lat);
+    var planeActive = ensureAircraftLayer(m);
     try {
       var halo = m.getSource("source-" + g._fullData[2].uid + "-circle");
       var dot = m.getSource("source-" + g._fullData[3].uid + "-circle");
       if (halo && dot) {
         halo.setData(fc);
-        dot.setData(fc);
+        // The plotly dot is the fallback when the symbol layer is unavailable.
+        dot.setData(planeActive ? EMPTY_FC : fc);
         g.data[2].lat = [s.lat]; g.data[2].lon = [s.lon];
         g.data[3].lat = [s.lat]; g.data[3].lon = [s.lon];
       }
+      if (planeActive) {
+        m.getSource("ft-ac-src").setData(pointFC(s.lon, s.lat, {hdg: s.hdg}));
+      }
     } catch (e) { /* map still initializing */ }
+    drawStare(g, m, s);
     if (follow) {
       m.jumpTo({center: [s.lon, s.lat]});
       if (g.layout.map) g.layout.map.center = {lat: s.lat, lon: s.lon};
@@ -130,6 +220,7 @@ window.FT = (function () {
     setText("rd-dist", s.dist.toFixed(1) + " nm");
     if (s.pitch !== null) setText("rd-pitch", (s.pitch >= 0 ? "+" : "") + s.pitch.toFixed(1) + "°");
     if (s.roll !== null) setText("rd-roll", (s.roll >= 0 ? "+" : "") + s.roll.toFixed(1) + "°");
+    if (d.slant) setText("rd-slant", s.slant == null ? "—" : fmtInt(s.slant) + " ft");
     setText("clock", fmtDur(s.t) + " / " + fmtDur(d.meta.duration_s));
   }
 
@@ -239,6 +330,62 @@ window.FT = (function () {
     setBasemap: function (style) {
       var g = gd();
       if (g) window.Plotly.relayout(g, {"map.style": style});
+    },
+    segmentStats: function (sel) {
+      /* Stats for a horizontally-selected time window on the profiles. */
+      if (!d || !sel || !sel.range) return "";
+      var r = sel.range.x || sel.range.x2;
+      if (!r) return "";
+      var t1 = Math.max(0, Math.min(r[0], r[1]) * 60);
+      var t2 = Math.min(d.meta.duration_s, Math.max(r[0], r[1]) * 60);
+      if (t2 - t1 < 1) return "";
+      var i1 = bisect(d.t, t1), i2 = Math.min(bisect(d.t, t2) + 2, d.t.length);
+      var gsSl = d.gs.slice(i1, i2), altSl = d.alt.slice(i1, i2), vsSl = d.vs.slice(i1, i2);
+      var avg = gsSl.reduce(function (a, b) { return a + b; }, 0) / Math.max(gsSl.length, 1);
+      var dist = sample(t2).dist - sample(t1).dist;
+      return "SEGMENT " + fmtDur(t1) + "–" + fmtDur(t2) +
+        "   ·   " + dist.toFixed(1) + " nm" +
+        "   ·   GS avg " + Math.round(avg) + " / max " + Math.round(Math.max.apply(null, gsSl)) + " kt" +
+        "   ·   ALT " + fmtInt(Math.min.apply(null, altSl)) + "–" + fmtInt(Math.max.apply(null, altSl)) + " ft" +
+        "   ·   " + fmtInt(Math.max.apply(null, vsSl)) + " / " + fmtInt(Math.min.apply(null, vsSl)) + " fpm";
+    },
+    exportTrack: function (fmt) {
+      /* Build a KML or GPX document from the loaded arrays and download it. */
+      if (!d) return;
+      var chip = document.getElementById("file-label");
+      var base = ((chip && chip.textContent) || "flight").split(" ·")[0]
+        .replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_") || "flight";
+      var i, body;
+      if (fmt === "gpx") {
+        var pts = [];
+        for (i = 0; i < d.t.length; i++) {
+          var tAttr = d.meta.t0_ms != null
+            ? "<time>" + new Date(d.meta.t0_ms + d.t[i] * 1000).toISOString() + "</time>" : "";
+          pts.push('<trkpt lat="' + d.lat[i] + '" lon="' + d.lon[i] + '">' +
+                   "<ele>" + (d.alt[i] / 3.280839895).toFixed(1) + "</ele>" + tAttr + "</trkpt>");
+        }
+        body = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+          '<gpx version="1.1" creator="flight-path-tracker" xmlns="http://www.topografix.com/GPX/1/1">' +
+          "<trk><name>" + base + "</name><trkseg>" + pts.join("") + "</trkseg></trk></gpx>";
+      } else {
+        var coords = [];
+        for (i = 0; i < d.t.length; i++) {
+          coords.push(d.lon[i] + "," + d.lat[i] + "," + (d.alt[i] / 3.280839895).toFixed(1));
+        }
+        body = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+          '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>' + base + "</name>" +
+          '<Placemark><name>Track</name><LineString><tessellate>1</tessellate>' +
+          "<altitudeMode>absolute</altitudeMode><coordinates>" + coords.join(" ") +
+          "</coordinates></LineString></Placemark></Document></kml>";
+      }
+      var blob = new Blob([body], {type: "application/xml"});
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = base + "." + fmt;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
     },
     prepUpload: function (contents, filename, maxRows) {
       /* Decode a dcc.Upload data-URI and, for very large files, stride-

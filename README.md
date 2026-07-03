@@ -40,7 +40,16 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
   MapLibre GeoJSON sources. Zero network requests and zero Plotly/camera calls
   during playback: the map **stays fully draggable while the flight plays**,
   smoothness is independent of server latency, and every visitor gets an
-  independent playback session.
+  independent playback session (uploads are per-visitor too).
+- **Sensor stare-point view** — for KLV data carrying frame-center tags
+  (21/23/24), the map draws the sensor stare-point with a line from the
+  aircraft, plus a slant-range readout; the aircraft renders as a
+  heading-rotated plane icon.
+- **Segment analytics** — drag-select a time range on the profiles to get
+  distance, speed, altitude band and climb stats for that leg.
+- **KML / GPX export** and **load-from-URL** (https, size-capped).
+- **Production-tuned** — Brotli-compressed responses (~5-10x smaller first
+  load), orjson serialization, `/healthz` for health checks and uptime pings.
 
 ## Quickstart
 
@@ -167,12 +176,13 @@ bundled KSFO→KLAX sample is used.
 
 **Deployment notes**
 
-- Playback runs entirely in each visitor's browser, so animation smoothness is
-  unaffected by server latency and visitors don't share playback state. The
-  server only parses CSVs: an upload swaps the flight that new page loads see
-  (run one worker process so that state stays consistent).
+- Playback runs entirely in each visitor's browser, and uploads are stateless
+  per-visitor — the server never mutates shared state, so any number of
+  visitors can use the site independently.
 - On the free Render plan the service sleeps when idle; the first visit after
-  a quiet period takes ~30–60 s to wake.
+  a quiet period takes ~30–60 s to wake. A free uptime pinger aimed at
+  `/healthz` (e.g. UptimeRobot at a 10-minute interval) or Render's paid
+  always-on tier eliminates the cold start.
 
 ## Basemaps
 

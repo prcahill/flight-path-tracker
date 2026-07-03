@@ -35,8 +35,8 @@ from .config import AppConfig
 from .data import load_flight_data
 from .metrics import FlightData, compass_point, format_duration
 
-# Map trace indices (order matters: engine.js updates traces 2 and 3).
-_LINE, _COLOR, _HALO, _DOT = 0, 1, 2, 3
+# Map trace indices (order matters: engine.js updates traces 2..5).
+_LINE, _COLOR, _HALO, _DOT, _STARE_LINE, _STARE_PT = 0, 1, 2, 3, 4, 5
 
 
 def _decimate(n: int, budget: int) -> np.ndarray:
@@ -51,6 +51,35 @@ def _decimate(n: int, budget: int) -> np.ndarray:
 
 def _fmt_int(x: float) -> str:
     return f"{int(round(x)):,}"
+
+
+def _fetch_log(url: str, max_bytes: int) -> str:
+    """Fetch a remote log with SSRF and size guards (https-only, public hosts)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    import requests
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError("only https:// URLs are allowed")
+    host = parsed.hostname or ""
+    for info in socket.getaddrinfo(host, None):
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError("URL resolves to a non-public address")
+    resp = requests.get(url, timeout=15, stream=True,
+                        headers={"User-Agent": "flight-path-tracker"})
+    resp.raise_for_status()
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_content(chunk_size=1 << 16):
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"remote file exceeds the {max_bytes // 1_000_000} MB limit")
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 class _State:
@@ -82,6 +111,14 @@ def _engine_payload(state: _State) -> dict:
     i = state.eng_idx
     lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
     rnd = lambda a, p: np.round(a[i], p).tolist()  # noqa: E731
+
+    def opt(a: np.ndarray | None, p: int) -> list | None:
+        """Optional channel: None if absent; NaN entries become JSON nulls."""
+        if a is None:
+            return None
+        vals = np.round(a[i], p)
+        return [float(v) if np.isfinite(v) else None for v in vals]
+
     return {
         "t": rnd(f.t, 2),
         "lat": rnd(f.lat, 5),
@@ -91,8 +128,11 @@ def _engine_payload(state: _State) -> dict:
         "hdg": rnd(f.hdg, 1),
         "vs": rnd(f.vs, 1),
         "dist": rnd(f.cum_nm, 2),
-        "pitch": rnd(f.pitch, 1) if f.pitch is not None else None,
-        "roll": rnd(f.roll, 1) if f.roll is not None else None,
+        "pitch": opt(f.pitch, 1),
+        "roll": opt(f.roll, 1),
+        "slant": opt(f.slant_ft, 0),
+        "fc_lat": opt(f.fc_lat, 5),
+        "fc_lon": opt(f.fc_lon, 5),
         "meta": {
             "duration_s": float(f.t[-1]),
             "t0_ms": int(f.t0.timestamp() * 1000) if f.t0 else None,
@@ -138,6 +178,16 @@ def _map_figure(state: _State) -> go.Figure:
     fig.add_trace(go.Scattermap(
         lat=[float(f.lat[0])], lon=[float(f.lon[0])], mode="markers",
         marker=dict(size=11, color=c.cursor), hoverinfo="skip", name="aircraft",
+    ))
+    # Sensor stare-point traces (populated by the engine for KLV data with
+    # frame-center tags; empty otherwise).
+    fig.add_trace(go.Scattermap(
+        lat=[], lon=[], mode="lines",
+        line=dict(width=1.5, color=c.stare), hoverinfo="skip", name="stare-line",
+    ))
+    fig.add_trace(go.Scattermap(
+        lat=[], lon=[], mode="markers",
+        marker=dict(size=9, color=c.stare), hoverinfo="skip", name="stare-point",
     ))
     lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
     fig.update_layout(
@@ -191,6 +241,7 @@ def _profiles_figure(state: _State) -> go.Figure:
         margin=dict(l=46, r=14, t=24, b=34),
         paper_bgcolor=c.panel, plot_bgcolor=c.panel, font=dict(color=c.muted),
         height=300, uirevision="keep",
+        dragmode="select", selectdirection="h",   # drag = segment analytics
     )
     return fig
 
@@ -224,11 +275,15 @@ def _readout_children(f: FlightData) -> list:
         ("rd-vs", "Vertical speed", f"{_fmt_int(f.vs[0])} ft/min"),
         ("rd-dist", "Distance flown", f"{f.cum_nm[0]:.1f} nm"),
     ]
-    # Attitude rows only when the source format carries them (e.g. KLV dumps).
+    # Attitude / sensor rows only when the source format carries them (KLV).
     if f.pitch is not None:
         rows.append(("rd-pitch", "Pitch", f"{f.pitch[0]:+.1f}°"))
     if f.roll is not None:
         rows.append(("rd-roll", "Roll", f"{f.roll[0]:+.1f}°"))
+    if f.slant_ft is not None:
+        first = f.slant_ft[0]
+        rows.append(("rd-slant", "Slant range",
+                     f"{_fmt_int(first)} ft" if np.isfinite(first) else "—"))
     return [html.Div(className="rd-row", children=[
         html.Span(label, className="rd-label"),
         html.Span(value, className="rd-value", id=rid),
@@ -247,7 +302,14 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         assets_folder=str(Path(__file__).parent / "assets"),
         title="Flight Path Tracker",
         update_title=None,
+        compress=True,   # Brotli/gzip via flask-compress: ~5-10x smaller payloads
     )
+    app.server.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+
+    @app.server.route("/healthz")
+    def _healthz():  # pragma: no cover - trivial route, exercised in tests
+        from . import __version__
+        return {"status": "ok", "version": __version__}
 
     file_label = Path(flight.file).name if flight and flight.file else "no file loaded"
     t_max = float(flight.t[-1]) if flight else 1.0
@@ -264,13 +326,16 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             ]),
             html.Div(id="file-label", className="chip", children=file_label),
             html.Div(className="header-controls", children=[
+                dcc.Input(id="url-in", type="url", className="url-in", debounce=True,
+                          placeholder="https://…  log URL"),
+                html.Button("GO", id="url-go", className="ghost go"),
                 dcc.Dropdown(id="basemap", className="dd",
                              options=[{"label": s, "value": s} for s in config.basemap_styles],
                              value=config.default_style, clearable=False),
                 dcc.Checklist(id="follow", className="follow",
                               options=[{"label": "FOLLOW", "value": "on"}], value=[]),
                 dcc.Upload(id="upload", className="upload",
-                           children=html.Div("⬆ LOAD CSV"), multiple=False),
+                           children=html.Div("⬆ LOAD FILE"), multiple=False),
             ]),
         ]),
 
@@ -294,6 +359,7 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
                 dcc.Graph(id="profiles", className="profiles",
                           config={"displayModeBar": False},
                           figure=_profiles_figure(state) if flight else go.Figure()),
+                html.Div(id="seg-stats", className="seg-stats"),
             ]),
         ]),
 
@@ -306,6 +372,8 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             dcc.Slider(id="scrub", min=0, max=t_max, value=0,
                        step=max(0.1, round(t_max / 2000.0, 2)),
                        marks=None, updatemode="drag", included=True),
+            html.Button("KML", id="export-kml", className="ghost"),
+            html.Button("GPX", id="export-gpx", className="ghost"),
             html.Div(id="clock", className="clock", children="00:00:00 / 00:00:00"),
         ]),
 
@@ -367,8 +435,31 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         prevent_initial_call=True,
     )
 
-    # ---- server: parse a (browser-staged) CSV and rebuild everything ------
-    @app.callback(
+    # ---- clientside: segment analytics + track exports ---------------------
+    app.clientside_callback(
+        "function(sel){ return window.FT ? window.FT.segmentStats(sel) : ''; }",
+        Output("seg-stats", "children"),
+        Input("profiles", "selectedData"),
+        prevent_initial_call=True,
+    )
+    app.clientside_callback(
+        "function(n){ if (window.FT) { window.FT.exportTrack('kml'); } return null; }",
+        Output("cs-ack", "data", allow_duplicate=True),
+        Input("export-kml", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    app.clientside_callback(
+        "function(n){ if (window.FT) { window.FT.exportTrack('gpx'); } return null; }",
+        Output("cs-ack", "data", allow_duplicate=True),
+        Input("export-gpx", "n_clicks"),
+        prevent_initial_call=True,
+    )
+
+    # ---- server: parse a flight and render the full response --------------
+    # Stateless on purpose: a local _State is built per request and the
+    # module-level boot state is never mutated, so each visitor's upload is
+    # isolated (new page loads always get the boot flight).
+    upload_outputs = (
         Output("map", "figure"),
         Output("profiles", "figure"),
         Output("kpis", "children"),
@@ -379,39 +470,73 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         Output("scrub", "value"),
         Output("play", "children", allow_duplicate=True),
         Output("engine-data", "data"),
-        Input("upload-csv", "data"),
-        prevent_initial_call=True,
     )
+
+    def _error(name: str, err: object) -> tuple:
+        return (no_update, no_update, no_update, no_update, f"⚠ {name}: {err}",
+                no_update, no_update, no_update, no_update, no_update)
+
+    def _render_text(text: str, name: str, label: str) -> tuple:
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
+                                         encoding="utf-8") as tmp:
+            tmp.write(text)
+            tmp_path = tmp.name
+        try:
+            flight = load_flight_data(tmp_path)
+        except Exception as exc:  # noqa: BLE001 - surface parse errors to the UI
+            return _error(name, exc)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+        flight.file = name
+        local = _State(flight, config)
+        t_max = float(flight.t[-1])
+        return (_map_figure(local), _profiles_figure(local), _kpi_children(flight),
+                _readout_children(flight), label, t_max,
+                max(0.1, round(t_max / 2000.0, 2)), 0.0, "▶  PLAY",
+                _engine_payload(local))
+
+    @app.callback(*upload_outputs, Input("upload-csv", "data"),
+                  prevent_initial_call=True)
     def _upload(staged):
         if not staged:
             return (no_update,) * 10
         name = staged.get("name", "uploaded.csv")
         if staged.get("err") or not staged.get("csv"):
-            err = staged.get("err", "empty file")
-            return (no_update, no_update, no_update, no_update, f"⚠ {name}: {err}",
-                    no_update, no_update, no_update, no_update, no_update)
-        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
-                                         encoding="utf-8") as tmp:
-            tmp.write(staged["csv"])
-            tmp_path = tmp.name
-        try:
-            flight = load_flight_data(tmp_path)
-        except Exception as exc:  # noqa: BLE001 - surface parse errors to the UI
-            return (no_update, no_update, no_update, no_update, f"⚠ {name}: {exc}",
-                    no_update, no_update, no_update, no_update, no_update)
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-        flight.file = name
-        state.set_flight(flight)
+            return _error(name, staged.get("err", "empty file"))
+        if len(staged["csv"]) > config.upload_max_bytes:
+            return _error(name, "file too large after staging "
+                                f"(limit {config.upload_max_bytes // 1_000_000} MB)")
         label = name
         orig, kept = staged.get("orig_rows", 0), staged.get("kept_rows", 0)
         if orig and kept and kept < orig:
             label = f"{name} · downsampled {orig:,} → {kept:,} rows"
-        t_max = float(flight.t[-1])
-        return (_map_figure(state), _profiles_figure(state), _kpi_children(flight),
-                _readout_children(flight), label, t_max,
-                max(0.1, round(t_max / 2000.0, 2)), 0.0, "▶  PLAY",
-                _engine_payload(state))
+        return _render_text(staged["csv"], name, label)
+
+    @app.callback(
+        Output("map", "figure", allow_duplicate=True),
+        Output("profiles", "figure", allow_duplicate=True),
+        Output("kpis", "children", allow_duplicate=True),
+        Output("readout", "children", allow_duplicate=True),
+        Output("file-label", "children", allow_duplicate=True),
+        Output("scrub", "max", allow_duplicate=True),
+        Output("scrub", "step", allow_duplicate=True),
+        Output("scrub", "value", allow_duplicate=True),
+        Output("play", "children", allow_duplicate=True),
+        Output("engine-data", "data", allow_duplicate=True),
+        Input("url-go", "n_clicks"),
+        Input("url-in", "n_submit"),
+        State("url-in", "value"),
+        prevent_initial_call=True,
+    )
+    def _load_url(_clicks, _submit, url):
+        if not url:
+            return (no_update,) * 10
+        name = url.rsplit("/", 1)[-1] or "remote log"
+        try:
+            text = _fetch_log(url, config.upload_max_bytes)
+        except Exception as exc:  # noqa: BLE001 - surface fetch errors to the UI
+            return _error(name, exc)
+        return _render_text(text, name, name)
 
 
 def run(flight: FlightData | None = None, config: AppConfig | None = None,

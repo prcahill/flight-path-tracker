@@ -102,6 +102,11 @@ class FlightData:
     # Optional attitude channels (present in e.g. KLV telemetry dumps).
     pitch: np.ndarray | None = None   # degrees, nose up positive
     roll: np.ndarray | None = None    # degrees, right wing down positive
+    # Optional sensor-pointing channels (KLV tags 21/23/24). May contain NaN
+    # where the dump had not yet reported them.
+    slant_ft: np.ndarray | None = None   # slant range to frame center, feet
+    fc_lat: np.ndarray | None = None     # frame center latitude, degrees
+    fc_lon: np.ndarray | None = None     # frame center longitude, degrees
     n: int = field(init=False)
 
     def __post_init__(self) -> None:

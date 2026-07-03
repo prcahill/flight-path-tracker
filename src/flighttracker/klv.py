@@ -49,6 +49,9 @@ _TAG_ROLL = 7
 _TAG_LAT = 13
 _TAG_LON = 14
 _TAG_ALT = 15
+_TAG_SLANT = 21
+_TAG_FC_LAT = 23
+_TAG_FC_LON = 24
 
 _FRAME_SPLIT_RE = re.compile(r"^=+\s*FRAME\s*=+\s*$", re.MULTILINE)
 _LINE_RE = re.compile(r"^\(\s*(\d+)\)\s*[^:]*:\s*(.+?)\s*$")
@@ -83,9 +86,14 @@ def load_klv_text(path: str | Path) -> FlightData:
     path = Path(path)
     text = path.read_text(encoding="utf-8", errors="replace")
 
-    records: list[tuple[float, float, float, float, float, float, float]] = []
-    # Forward-filled state (file order): alt_ft, heading, pitch, roll.
-    last = {"alt": np.nan, "hdg": np.nan, "pitch": np.nan, "roll": np.nan}
+    records: list[tuple[float, ...]] = []
+    # Forward-filled state (file order).
+    last = {"alt": np.nan, "hdg": np.nan, "pitch": np.nan, "roll": np.nan,
+            "slant": np.nan, "fc_lat": np.nan, "fc_lon": np.nan}
+    _FILL = (("alt", _TAG_ALT, M_TO_FT), ("hdg", _TAG_HEADING, 1.0),
+             ("pitch", _TAG_PITCH, 1.0), ("roll", _TAG_ROLL, 1.0),
+             ("slant", _TAG_SLANT, M_TO_FT), ("fc_lat", _TAG_FC_LAT, 1.0),
+             ("fc_lon", _TAG_FC_LON, 1.0))
 
     for block in _FRAME_SPLIT_RE.split(text):
         fields: dict[int, str] = {}
@@ -94,14 +102,9 @@ def load_klv_text(path: str | Path) -> FlightData:
             if m:
                 fields[int(m.group(1))] = m.group(2)
 
-        if (alt_m := _num(fields, _TAG_ALT)) == alt_m:  # not NaN
-            last["alt"] = alt_m * M_TO_FT
-        if (hdg := _num(fields, _TAG_HEADING)) == hdg:
-            last["hdg"] = hdg
-        if (pitch := _num(fields, _TAG_PITCH)) == pitch:
-            last["pitch"] = pitch
-        if (roll := _num(fields, _TAG_ROLL)) == roll:
-            last["roll"] = roll
+        for key, tag, scale in _FILL:
+            if (v := _num(fields, tag)) == v:  # not NaN
+                last[key] = v * scale
 
         lat, lon = _num(fields, _TAG_LAT), _num(fields, _TAG_LON)
         if np.isnan(lat) or np.isnan(lon):
@@ -110,8 +113,9 @@ def load_klv_text(path: str | Path) -> FlightData:
         epoch = _parse_time(t_raw) if t_raw else None
         if epoch is None:
             continue
-        records.append((epoch, lat, lon, last["alt"],
-                        last["hdg"], last["pitch"], last["roll"]))
+        records.append((epoch, lat, lon, last["alt"], last["hdg"],
+                        last["pitch"], last["roll"], last["slant"],
+                        last["fc_lat"], last["fc_lon"]))
 
     if len(records) < 2:
         raise ValueError(
@@ -120,24 +124,25 @@ def load_klv_text(path: str | Path) -> FlightData:
 
     arr = np.array(records, dtype=float)
     epoch, lat, lon, alt = arr[:, 0], arr[:, 1], arr[:, 2], arr[:, 3]
-    hdg, pitch, roll = arr[:, 4], arr[:, 5], arr[:, 6]
+    extras = arr[:, 4:]  # hdg, pitch, roll, slant, fc_lat, fc_lon
 
     # Clean: valid positions, sort by time, drop non-increasing timestamps.
     good = (np.isfinite(lat) & np.isfinite(lon) & np.isfinite(alt)
             & (np.abs(lat) <= 90) & (np.abs(lon) <= 180))
-    epoch, lat, lon, alt = epoch[good], lat[good], lon[good], alt[good]
-    hdg, pitch, roll = hdg[good], pitch[good], roll[good]
-
+    epoch, lat, lon, alt, extras = (epoch[good], lat[good], lon[good],
+                                    alt[good], extras[good])
     order = np.argsort(epoch, kind="stable")
-    epoch, lat, lon, alt = epoch[order], lat[order], lon[order], alt[order]
-    hdg, pitch, roll = hdg[order], pitch[order], roll[order]
-
+    epoch, lat, lon, alt, extras = (epoch[order], lat[order], lon[order],
+                                    alt[order], extras[order])
     keep = np.concatenate([[True], np.diff(epoch) > 0])
-    epoch, lat, lon, alt = epoch[keep], lat[keep], lon[keep], alt[keep]
-    hdg, pitch, roll = hdg[keep], pitch[keep], roll[keep]
+    epoch, lat, lon, alt, extras = (epoch[keep], lat[keep], lon[keep],
+                                    alt[keep], extras[keep])
 
     if epoch.size < 2:
         raise ValueError("Need at least two valid samples after cleaning.")
+
+    hdg, pitch, roll = extras[:, 0], extras[:, 1], extras[:, 2]
+    slant, fc_lat, fc_lon = extras[:, 3], extras[:, 4], extras[:, 5]
 
     t = epoch - epoch[0]
     t0 = datetime.fromtimestamp(epoch[0], tz=timezone.utc)
@@ -152,4 +157,9 @@ def load_klv_text(path: str | Path) -> FlightData:
         fd.pitch = np.nan_to_num(pitch, nan=0.0)
     if np.isfinite(roll).any():
         fd.roll = np.nan_to_num(roll, nan=0.0)
+    # Sensor pointing keeps NaN where unreported (rendered as gaps client-side).
+    if np.isfinite(slant).any():
+        fd.slant_ft = slant
+    if np.isfinite(fc_lat).any() and np.isfinite(fc_lon).any():
+        fd.fc_lat, fd.fc_lon = fc_lat, fc_lon
     return fd

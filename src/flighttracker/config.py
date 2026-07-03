@@ -33,6 +33,7 @@ class AppConfig:
     path_marker_budget: int = 4_000   # altitude-colored marker overlay
     engine_budget: int = 6_000        # profiles + client-side playback arrays
     upload_max_rows: int = 50_000     # larger uploads are decimated in-browser
+    upload_max_bytes: int = 15_000_000  # staged-text / remote-fetch size cap
 
     # Theme colors (General Atomics-style navy / blue).
     bg: str = "#0A1526"            # app background
@@ -43,6 +44,7 @@ class AppConfig:
     muted: str = "#8FA3C2"
     accent: str = "#2C7BE5"        # GA blue: buttons, highlights
     halo: str = "rgba(44,123,229,0.38)"  # soft ring under the aircraft marker
+    stare: str = "#FFB020"         # sensor stare-point + line (KLV data)
     cursor: str = "#FFFFFF"        # chart cursor dots + aircraft marker
     color_alt: str = "#5AA9FF"     # altitude trace
     color_speed: str = "#8FE388"   # speed trace
