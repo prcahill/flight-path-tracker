@@ -99,6 +99,9 @@ class FlightData:
     summary: FlightSummary
     t0: datetime | None = None
     file: str = ""
+    # Optional attitude channels (present in e.g. KLV telemetry dumps).
+    pitch: np.ndarray | None = None   # degrees, nose up positive
+    roll: np.ndarray | None = None    # degrees, right wing down positive
     n: int = field(init=False)
 
     def __post_init__(self) -> None:

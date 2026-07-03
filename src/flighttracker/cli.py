@@ -6,9 +6,10 @@ import argparse
 from pathlib import Path
 
 from .config import AppConfig
-from .sample import generate_sample_flight_data
+from .sample import generate_sample_flight_data, generate_sample_klv_text
 
 _DEFAULT_SAMPLE = "data/sample_flight_KSFO_KLAX.csv"
+_DEFAULT_KLV_SAMPLE = "data/sample_uav_telemetry.txt"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -25,15 +26,25 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--debug", action="store_true", help="Run Dash in debug mode.")
 
     gen = sub.add_parser("generate", help="Write a realistic sample flight log.")
-    gen.add_argument("-o", "--out", default=_DEFAULT_SAMPLE, help="Output CSV path.")
-    gen.add_argument("--minutes", type=float, default=60.0, help="Flight duration in minutes.")
-    gen.add_argument("--rate", type=float, default=5.0, help="Sample rate in Hz.")
+    gen.add_argument("-o", "--out", default=None, help="Output path.")
+    gen.add_argument("--format", choices=("csv", "klv"), default="csv",
+                     help="csv: airliner track CSV; klv: frame-text KLV "
+                          "telemetry dump (MISB ST 0601-style).")
+    gen.add_argument("--minutes", type=float, default=None,
+                     help="Flight duration in minutes (default 60 csv / 25 klv).")
+    gen.add_argument("--rate", type=float, default=None,
+                     help="Sample rate in Hz (default 5 csv / 10 klv).")
 
     return parser
 
 
 def _cmd_generate(args: argparse.Namespace) -> int:
-    generate_sample_flight_data(args.out, args.minutes, args.rate)
+    if args.format == "klv":
+        generate_sample_klv_text(args.out or _DEFAULT_KLV_SAMPLE,
+                                 args.minutes or 25.0, args.rate or 10.0)
+    else:
+        generate_sample_flight_data(args.out or _DEFAULT_SAMPLE,
+                                    args.minutes or 60.0, args.rate or 5.0)
     return 0
 
 

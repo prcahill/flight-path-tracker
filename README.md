@@ -67,7 +67,36 @@ flighttracker generate [--out PATH] [--minutes N] [--rate HZ]
 flighttracker run      [--file PATH] [--host HOST] [--port PORT] [--debug]
 ```
 
-## Input file format
+## Input file formats
+
+The loader sniffs the content, so both formats work everywhere a file can be
+loaded (CLI `--file`, `FLIGHT_LOG`, and drag-and-drop upload).
+
+### KLV frame-text telemetry (MISB ST 0601-style)
+
+Decoded UAS metadata dumps stored as frame blocks:
+
+```
+========== FRAME ==========
+(  2) Unix Time Stamp           : 2026-06-15 06:21:01.678
+(  5) Platform Heading Angle    : 80.3 deg
+( 13) Sensor Latitude           : 33.843407 deg
+( 14) Sensor Longitude          : 131.031684 deg
+( 15) Sensor True Altitude      : 15.2 m
+========= END FRAME ========
+```
+
+Fields are matched by numeric tag (2 time, 5/6/7 heading/pitch/roll,
+13/14/15 sensor lat/lon/altitude); unknown tags are ignored. The parser is
+built for real dumps: sparse frames (a track point is emitted only for frames
+carrying lat + lon), interleaved async streams with out-of-order and duplicate
+timestamps, forward-filled altitude/attitude, and metric units converted to
+aviation units (m → ft). Ground speed and vertical speed are derived from the
+track; pitch and roll appear as extra LIVE readout rows. Generate a 2.6M-char
+sample with `flighttracker generate --format klv`
+(→ `data/sample_uav_telemetry.txt`).
+
+### CSV
 
 Comma-separated text, one header row, one sample per row. Canonical columns:
 

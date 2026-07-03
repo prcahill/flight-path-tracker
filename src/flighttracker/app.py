@@ -91,6 +91,8 @@ def _engine_payload(state: _State) -> dict:
         "hdg": rnd(f.hdg, 1),
         "vs": rnd(f.vs, 1),
         "dist": rnd(f.cum_nm, 2),
+        "pitch": rnd(f.pitch, 1) if f.pitch is not None else None,
+        "roll": rnd(f.roll, 1) if f.roll is not None else None,
         "meta": {
             "duration_s": float(f.t[-1]),
             "t0_ms": int(f.t0.timestamp() * 1000) if f.t0 else None,
@@ -222,6 +224,11 @@ def _readout_children(f: FlightData) -> list:
         ("rd-vs", "Vertical speed", f"{_fmt_int(f.vs[0])} ft/min"),
         ("rd-dist", "Distance flown", f"{f.cum_nm[0]:.1f} nm"),
     ]
+    # Attitude rows only when the source format carries them (e.g. KLV dumps).
+    if f.pitch is not None:
+        rows.append(("rd-pitch", "Pitch", f"{f.pitch[0]:+.1f}°"))
+    if f.roll is not None:
+        rows.append(("rd-roll", "Roll", f"{f.roll[0]:+.1f}°"))
     return [html.Div(className="rd-row", children=[
         html.Span(label, className="rd-label"),
         html.Span(value, className="rd-value", id=rid),

@@ -62,6 +62,8 @@ window.FT = (function () {
       t: t, lat: lerp(d.lat), lon: lerp(d.lon), alt: lerp(d.alt),
       gs: lerp(d.gs), vs: lerp(d.vs), dist: lerp(d.dist),
       hdg: ((d.hdg[i] + dh * w) % 360 + 360) % 360,
+      pitch: d.pitch ? lerp(d.pitch) : null,
+      roll: d.roll ? lerp(d.roll) : null,
     };
   }
 
@@ -126,6 +128,8 @@ window.FT = (function () {
             COMPASS[Math.round(s.hdg / 22.5) % 16]);
     setText("rd-vs", fmtInt(s.vs) + " ft/min");
     setText("rd-dist", s.dist.toFixed(1) + " nm");
+    if (s.pitch !== null) setText("rd-pitch", (s.pitch >= 0 ? "+" : "") + s.pitch.toFixed(1) + "°");
+    if (s.roll !== null) setText("rd-roll", (s.roll >= 0 ? "+" : "") + s.roll.toFixed(1) + "°");
     setText("clock", fmtDur(s.t) + " / " + fmtDur(d.meta.duration_s));
   }
 
@@ -248,6 +252,22 @@ window.FT = (function () {
         text = atob(contents.split(",", 2)[1]);
       } catch (e) {
         return {name: name, err: "could not decode the uploaded file"};
+      }
+      // Frame-delimited KLV dumps must be decimated by FRAME, not by line --
+      // a line stride would tear frames apart and corrupt the format.
+      var frameDelim = text.slice(0, 8192).match(/=+\s*FRAME\s*=+/);
+      if (frameDelim) {
+        var blocks = text.split(frameDelim[0]);
+        var head = blocks.shift();                  // anything before frame 1
+        var origFrames = blocks.length;
+        if (origFrames > maxRows) {
+          var fstride = Math.ceil(origFrames / maxRows);
+          var kept = [];
+          for (var b = 0; b < blocks.length; b += fstride) kept.push(blocks[b]);
+          text = head + frameDelim[0] + kept.join(frameDelim[0]);
+          return {name: name, csv: text, orig_rows: origFrames, kept_rows: kept.length};
+        }
+        return {name: name, csv: text, orig_rows: origFrames, kept_rows: origFrames};
       }
       var lines = text.split(/\r?\n/);
       while (lines.length && !lines[lines.length - 1].trim()) lines.pop();

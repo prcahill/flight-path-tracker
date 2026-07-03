@@ -176,3 +176,173 @@ def generate_sample_flight_data(
     print(f"  rows: {n}   |   duration: {duration_min:g} min   |   rate: {rate_hz:g} Hz")
     print(f"  route length: {total_nm:.1f} nm   |   file size: {size_mb:.2f} MB")
     return resolved
+
+
+# ======================================================================= #
+#  KLV frame-text sample (MISB ST 0601-style decoded metadata dump)       #
+# ======================================================================= #
+_KLV_START = "========== FRAME =========="
+_KLV_END = "========= END FRAME ========"
+
+
+def _klv_line(tag: int, name: str, value: str) -> str:
+    return f"({tag:3d}) {name:<25s} : {value}"
+
+
+def _klv_ts(epoch: float) -> str:
+    from datetime import datetime
+    dt = datetime.fromtimestamp(epoch)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + f".{int(round(epoch % 1 * 1000)) % 1000:03d}"
+
+
+def generate_sample_klv_text(
+    out_path: str | Path,
+    duration_min: float = 25.0,
+    rate_hz: float = 10.0,
+) -> Path:
+    """Write a realistic KLV frame-text telemetry dump (>= 2M characters).
+
+    Simulates a small-UAS surveillance mission (takeoff, transit, two orbit
+    loiters, return, landing) and reproduces how real decoded KLV dumps
+    behave: a video-rate frame stream in which most frames carry only a
+    timestamp, full sensor frames arrive at ~1 Hz, an async airspeed stream
+    is interleaved with ~5 s stale timestamps, and occasional duplicate
+    timestamps appear.
+    """
+    out_path = Path(out_path)
+    rng = np.random.default_rng(7)
+
+    # ---- 1 Hz mission kinematics ------------------------------------------
+    dur_s = int(duration_min * 60)
+    t1 = np.arange(dur_s + 1, dtype=float)
+    lat0, lon0, ground_m = 33.8434, 131.0317, 15.0
+    m_lat = 1.0 / 111_320.0                                  # deg per meter
+    m_lon = 1.0 / (111_320.0 * np.cos(np.radians(lat0)))
+
+    x = np.zeros_like(t1)   # meters east
+    y = np.zeros_like(t1)   # meters north
+    alt_m = np.full_like(t1, ground_m)
+
+    def orbit(tt, t_in, cx, cy, r, omega, phi0):
+        ang = phi0 + omega * (tt - t_in)
+        return cx + r * np.cos(ang), cy + r * np.sin(ang)
+
+    for i, tt in enumerate(t1):
+        if tt < 60:                                   # holding on the strip
+            x[i], y[i] = 0.0, 0.0
+        elif tt < 300:                                # climb-out + transit NE
+            f = (tt - 60) / 240.0
+            s = f * f * (3 - 2 * f)                   # smoothstep
+            x[i], y[i] = 2100 * s, 1700 * s
+        elif tt < 800:                                # orbit A
+            x[i], y[i] = orbit(tt, 300, 2100 - 400, 1700, 400, 0.05, 0.0)
+        elif tt < 900:                                # transit to orbit B
+            f = (tt - 800) / 100.0
+            xa, ya = orbit(800, 300, 1700, 1700, 400, 0.05, 0.0)
+            x[i], y[i] = xa + (3600 - xa) * f, ya + (1200 - ya) * f
+        elif tt < 1300:                               # orbit B
+            x[i], y[i] = orbit(tt, 900, 3600 - 350, 1200, 350, -0.06, 0.0)
+        elif tt < dur_s - 60:                         # return transit
+            f = (tt - 1300) / max(dur_s - 60 - 1300, 1)
+            xb, yb = orbit(1300, 900, 3250, 1200, 350, -0.06, 0.0)
+            x[i], y[i] = xb * (1 - f), yb * (1 - f)
+        else:                                         # approach + landing
+            x[i], y[i] = 0.0, 0.0
+        # altitude profile
+        if tt < 90:
+            alt_m[i] = ground_m
+        elif tt < 300:
+            alt_m[i] = ground_m + 105 * min(1.0, (tt - 90) / 180.0)
+        elif tt < dur_s - 120:
+            alt_m[i] = ground_m + 105
+        else:
+            alt_m[i] = ground_m + 105 * max(0.0, (dur_s - 60 - tt) / 60.0)
+
+    x = _box_smooth(x, 9)
+    y = _box_smooth(y, 9)
+    alt_m = _box_smooth(alt_m, 15) + 0.4 * rng.standard_normal(t1.size)
+    lat1 = lat0 + y * m_lat
+    lon1 = lon0 + x * m_lon
+
+    # attitude + speeds from the kinematics
+    vx, vy = np.gradient(x, t1), np.gradient(y, t1)
+    spd_ms = np.hypot(vx, vy)
+    hdg1 = np.degrees(np.arctan2(vx, vy)) % 360.0
+    hdg_rate = np.gradient(np.unwrap(np.radians(hdg1)), t1)
+    roll1 = np.degrees(np.arctan2(spd_ms * hdg_rate, 9.81))
+    roll1 = np.clip(_box_smooth(roll1, 7), -35, 35) + 0.3 * rng.standard_normal(t1.size)
+    pitch1 = np.clip(np.degrees(np.arctan2(np.gradient(alt_m, t1),
+                                           np.maximum(spd_ms, 1.0))), -15, 15)
+    pitch1 = _box_smooth(pitch1, 7) + 0.3 * rng.standard_normal(t1.size)
+
+    # ---- emit the 10 Hz frame stream --------------------------------------
+    from datetime import datetime
+    start_epoch = datetime(2026, 6, 15, 6, 20, 0).timestamp()
+    dt_tick = 1.0 / rate_hz
+    n_ticks = int(dur_s * rate_hz)
+    out: list[str] = []
+
+    def frame(lines: list[str]) -> None:
+        out.append(_KLV_START)
+        out.extend(lines)
+        out.append(_KLV_END)
+        out.append("")
+
+    for k in range(n_ticks + 1):
+        epoch = start_epoch + k * dt_tick
+        ts_line = _klv_line(2, "Unix Time Stamp", _klv_ts(epoch))
+        sub = k % int(rate_hz)
+        i = min(k // int(rate_hz), dur_s)             # 1 Hz sample index
+
+        if sub == 0:                                   # full sensor frame
+            lines = [
+                ts_line,
+                _klv_line(5, "Platform Heading Angle", f"{hdg1[i]:.1f} deg"),
+                _klv_line(6, "Platform Pitch Angle", f"{pitch1[i]:.1f} deg"),
+                _klv_line(7, "Platform Roll Angle", f"{roll1[i]:.1f} deg"),
+                _klv_line(13, "Sensor Latitude", f"{lat1[i]:.6f} deg"),
+                _klv_line(14, "Sensor Longitude", f"{lon1[i]:.6f} deg"),
+                _klv_line(15, "Sensor True Altitude", f"{alt_m[i]:.1f} m"),
+                _klv_line(16, "Sensor Horizontal FOV", "31.53 deg"),
+                _klv_line(17, "Sensor Vertical FOV", "17.74 deg"),
+                _klv_line(18, "Sensor Relative Azimuth",
+                          f"{(360 - 0.05 * (i % 100)) % 360:.2f} deg"),
+                _klv_line(19, "Sensor Relative Elevation", f"{0.05 * (i % 3):.2f} deg"),
+                _klv_line(20, "Sensor Relative Roll", f"{-0.01 * (i % 4):.2f} deg"),
+            ]
+            if i % 10 == 0:                            # extended frame
+                slant = 550 + 50 * np.sin(i / 30)
+                lines += [
+                    _klv_line(21, "Slant Range", f"{slant:.1f} m"),
+                    _klv_line(22, "Target Width", f"{slant * 0.558:.1f} m"),
+                    _klv_line(23, "Frame Center Latitude", f"{lat1[i] + 0.0011:.6f} deg"),
+                    _klv_line(24, "Frame Center Longitude", f"{lon1[i] + 0.0063:.6f} deg"),
+                    _klv_line(25, "Frame Center Elevation", "4.6 m"),
+                    _klv_line(40, "Platform Roll Rate", "67.72 deg/s"),
+                    _klv_line(41, "Platform Yaw Rate", "131.04 deg/s"),
+                ]
+            lines.append(_klv_line(65, "Platform Ground Speed", "0f"))
+            frame(lines)
+        elif sub == 7:                                 # async airspeed stream
+            lag_epoch = epoch - 5.1
+            j = min(max(int(lag_epoch - start_epoch), 0), dur_s)
+            frame([
+                _klv_line(2, "Unix Time Stamp", _klv_ts(lag_epoch)),
+                _klv_line(8, "Platform True Airspeed", f"{spd_ms[j] * 3.6:.1f} km/h"),
+            ])
+        else:                                          # timestamp-only frame
+            frame([ts_line])
+            if k % 37 == 5:                            # duplicate-ts quirk
+                frame([ts_line])
+
+    text = "\n".join(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text, encoding="utf-8")
+
+    resolved = out_path.resolve()
+    print(f"Wrote {resolved}")
+    print(f"  frames: ~{n_ticks:,}   |   duration: {duration_min:g} min   |   "
+          f"characters: {len(text):,}")
+    print(f"  position frames (1 Hz): {dur_s + 1:,}   |   file size: "
+          f"{resolved.stat().st_size / 1e6:.2f} MB")
+    return resolved

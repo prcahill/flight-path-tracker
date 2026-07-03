@@ -40,12 +40,21 @@ def _find_col(columns: list[str], patterns: list[str]) -> int | None:
 def load_flight_data(path: str | Path) -> FlightData:
     """Load a flight log and return a :class:`FlightData` with derived metrics.
 
-    Only latitude, longitude and altitude are required; ground speed and heading
+    The format is sniffed from the content: frame-delimited KLV metadata
+    dumps (see :mod:`flighttracker.klv`) are routed to the KLV parser;
+    anything else is treated as delimited text (CSV). For CSV, only
+    latitude, longitude and altitude are required; ground speed and heading
     are derived if absent.
     """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"File not found: {path}")
+
+    from .klv import SNIFF_RE, load_klv_text
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        head = fh.read(4096)
+    if SNIFF_RE.search(head):
+        return load_klv_text(path)
 
     df = pd.read_csv(path)
     if df.empty:
