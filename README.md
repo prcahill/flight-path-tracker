@@ -34,11 +34,13 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 - **Drag-and-drop CSV upload** to load a different log at runtime.
 - **Scales to millions of points** — the path is decimated to two display
   budgets (a cheap ground-track polyline plus a sparse altitude-colored
-  overlay; it does not draw every point), and marker updates are written
-  client-side straight into the MapLibre GeoJSON sources — zero Plotly/camera
-  calls during playback, so the map **stays fully draggable while the flight
-  plays**. Playback advances by real elapsed time, so dense logs skip frames
-  instead of crawling.
+  overlay; it does not draw every point).
+- **Fully client-side playback** — a 60 fps requestAnimationFrame engine
+  interpolates the flight locally and writes positions straight into the
+  MapLibre GeoJSON sources. Zero network requests and zero Plotly/camera calls
+  during playback: the map **stays fully draggable while the flight plays**,
+  smoothness is independent of server latency, and every visitor gets an
+  independent playback session.
 
 ## Quickstart
 
@@ -136,15 +138,12 @@ bundled KSFO→KLAX sample is used.
 
 **Deployment notes**
 
-- The app keeps flight and playback state server-side in a single session, so
-  a deployment is a **single-user demo** — run exactly one worker process
-  (concurrent visitors would share the same playback state).
+- Playback runs entirely in each visitor's browser, so animation smoothness is
+  unaffected by server latency and visitors don't share playback state. The
+  server only parses CSVs: an upload swaps the flight that new page loads see
+  (run one worker process so that state stays consistent).
 - On the free Render plan the service sleeps when idle; the first visit after
   a quiet period takes ~30–60 s to wake.
-- Playback animation is driven by client–server round trips, so smoothness
-  over the internet depends on your latency to the server; the wall-clock
-  playback design skips frames rather than drifting, so position and timing
-  stay accurate.
 
 ## Basemaps
 

@@ -31,11 +31,7 @@ class AppConfig:
     # overlay -- large logs are decimated to these budgets, never re-sent.
     path_line_budget: int = 20_000    # ground-track polyline
     path_marker_budget: int = 4_000   # altitude-colored marker overlay
-    profile_budget: int = 6_000       # altitude / speed mini-charts
-
-    # Animation cadence (ms). Playback is timed off the wall clock and the
-    # aircraft position is interpolated between samples each tick.
-    interval_ms: int = 80
+    engine_budget: int = 6_000        # profiles + client-side playback arrays
 
     # Theme colors (General Atomics-style navy / blue).
     bg: str = "#0A1526"            # app background
