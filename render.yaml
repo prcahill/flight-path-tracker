@@ -8,8 +8,8 @@ services:
     name: flight-path-tracker
     runtime: python
     plan: free
-    buildCommand: pip install ".[deploy]"
-    startCommand: gunicorn --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:$PORT flighttracker.wsgi:server
+    buildCommand: pip install -r requirements.txt && pip install .
+    startCommand: python -m gunicorn --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:$PORT flighttracker.wsgi:server
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.6

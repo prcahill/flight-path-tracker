@@ -127,8 +127,8 @@ production WSGI entry point (`flighttracker.wsgi:server`):
 Any other host works the same way:
 
 ```bash
-pip install ".[deploy]"
-gunicorn --workers 1 --threads 8 --bind 0.0.0.0:$PORT flighttracker.wsgi:server
+pip install -r requirements.txt && pip install .
+python -m gunicorn --workers 1 --threads 8 --bind 0.0.0.0:$PORT flighttracker.wsgi:server
 ```
 
 Set `FLIGHT_LOG=/path/to/log.csv` to serve a specific file; otherwise the
