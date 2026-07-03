@@ -115,6 +115,37 @@ pytest          # unit tests, incl. anti-spike regression guards
 ruff check .    # lint
 ```
 
+## Deploying to the web
+
+The repo ships a [Render](https://render.com) blueprint (`render.yaml`) and a
+production WSGI entry point (`flighttracker.wsgi:server`):
+
+1. Sign in to Render with GitHub.
+2. **New → Blueprint** and select this repository — Render reads `render.yaml`
+   and deploys automatically. Every push to `main` redeploys.
+
+Any other host works the same way:
+
+```bash
+pip install ".[deploy]"
+gunicorn --workers 1 --threads 8 --bind 0.0.0.0:$PORT flighttracker.wsgi:server
+```
+
+Set `FLIGHT_LOG=/path/to/log.csv` to serve a specific file; otherwise the
+bundled KSFO→KLAX sample is used.
+
+**Deployment notes**
+
+- The app keeps flight and playback state server-side in a single session, so
+  a deployment is a **single-user demo** — run exactly one worker process
+  (concurrent visitors would share the same playback state).
+- On the free Render plan the service sleeps when idle; the first visit after
+  a quiet period takes ~30–60 s to wake.
+- Playback animation is driven by client–server round trips, so smoothness
+  over the internet depends on your latency to the server; the wall-clock
+  playback design skips frames rather than drifting, so position and timing
+  stay accurate.
+
 ## Basemaps
 
 Default styles (`carto-darkmatter`, `carto-positron`, `open-street-map`,
