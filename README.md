@@ -35,6 +35,11 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 - **Scales to millions of points** — the path is decimated to two display
   budgets (a cheap ground-track polyline plus a sparse altitude-colored
   overlay; it does not draw every point).
+- **HI-FI mode** — toggle in the header before loading a file: upload
+  downsampling is disabled (every sample reaches the server, so all metrics
+  are exact) and display/playback budgets rise ~40×. Verified with a
+  720,001-row upload end-to-end in ~7 s locally. Response compression is
+  Brotli and always lossless, in either mode.
 - **Fully client-side playback** — a 60 fps requestAnimationFrame engine
   interpolates the flight locally and writes positions straight into the
   MapLibre GeoJSON sources. Zero network requests and zero Plotly/camera calls

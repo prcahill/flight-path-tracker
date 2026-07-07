@@ -85,8 +85,10 @@ def _fetch_log(url: str, max_bytes: int) -> str:
 class _State:
     """Server-side holder for the loaded flight and precomputed display arrays."""
 
-    def __init__(self, flight: FlightData | None, config: AppConfig):
+    def __init__(self, flight: FlightData | None, config: AppConfig,
+                 hifi: bool = False):
         self.config = config
+        self.hifi = hifi
         self.set_flight(flight)
 
     def set_flight(self, flight: FlightData | None) -> None:
@@ -94,23 +96,30 @@ class _State:
         if flight is None:
             return
         c = self.config
-        li = _decimate(flight.n, c.path_line_budget)
+        b = 1 if self.hifi else 0
+        li = _decimate(flight.n, c.path_line_budget[b])
         self.line_lat = flight.lat[li]
         self.line_lon = flight.lon[li]
-        mi = _decimate(flight.n, c.path_marker_budget)
+        mi = _decimate(flight.n, c.path_marker_budget[b])
         self.mark_lat = flight.lat[mi]
         self.mark_lon = flight.lon[mi]
         self.mark_alt = flight.alt[mi]
-        self.eng_idx = _decimate(flight.n, c.engine_budget)
+        self.eng_idx = _decimate(flight.n, c.engine_budget[b])
+        self.prof_idx = _decimate(flight.n, c.profile_budget[b])
 
 
 def _engine_payload(state: _State) -> dict:
-    """Decimated flight arrays + metadata consumed by ``assets/engine.js``."""
+    """Decimated flight arrays + metadata consumed by ``assets/engine.js``.
+
+    HI-FI mode carries more points (see ``AppConfig.engine_budget``) and one
+    extra digit of position/time precision.
+    """
     f = state.flight
     c = state.config
     i = state.eng_idx
+    xp = 1 if state.hifi else 0   # extra precision in hi-fi mode
     lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
-    rnd = lambda a, p: np.round(a[i], p).tolist()  # noqa: E731
+    rnd = lambda a, p: np.round(a[i], p + xp).tolist()  # noqa: E731
 
     def opt(a: np.ndarray | None, p: int) -> list | None:
         """Optional channel: None if absent; NaN entries become JSON nulls."""
@@ -213,7 +222,7 @@ def _zoom_for(lat_lim, lon_lim) -> float:
 def _profiles_figure(state: _State) -> go.Figure:
     f = state.flight
     c = state.config
-    i = state.eng_idx
+    i = state.prof_idx
     prof_t = f.t[i] / 60.0
     cm = dict(color=c.cursor, size=8, line=dict(color=c.accent, width=2))
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.16,
@@ -304,7 +313,7 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         update_title=None,
         compress=True,   # Brotli/gzip via flask-compress: ~5-10x smaller payloads
     )
-    app.server.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+    app.server.config["MAX_CONTENT_LENGTH"] = 160 * 1024 * 1024
 
     @app.server.route("/healthz")
     def _healthz():  # pragma: no cover - trivial route, exercised in tests
@@ -334,6 +343,13 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
                              value=config.default_style, clearable=False),
                 dcc.Checklist(id="follow", className="follow",
                               options=[{"label": "FOLLOW", "value": "on"}], value=[]),
+                html.Div(title="Full fidelity for the next file load: no upload "
+                               "downsampling (exact metrics from every sample) and "
+                               "much higher display/playback detail. Slower with "
+                               "very large files.",
+                         children=dcc.Checklist(
+                             id="hifi", className="follow",
+                             options=[{"label": "HI-FI", "value": "on"}], value=[])),
                 dcc.Upload(id="upload", className="upload",
                            children=html.Div("⬆ LOAD FILE"), multiple=False),
             ]),
@@ -427,11 +443,13 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         prevent_initial_call=True,
     )
     app.clientside_callback(
-        "function(c, f){ return window.FT ? window.FT.prepUpload(c, f, "
-        f"{config.upload_max_rows}) : null; }}",
+        "function(c, f, h){ var lossless = h && h.length > 0; "
+        "return window.FT ? window.FT.prepUpload(c, f, "
+        f"lossless ? 1e12 : {config.upload_max_rows}) : null; }}",
         Output("upload-csv", "data"),
         Input("upload", "contents"),
         State("upload", "filename"),
+        State("hifi", "value"),
         prevent_initial_call=True,
     )
 
@@ -476,7 +494,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         return (no_update, no_update, no_update, no_update, f"⚠ {name}: {err}",
                 no_update, no_update, no_update, no_update, no_update)
 
-    def _render_text(text: str, name: str, label: str) -> tuple:
+    def _render_text(text: str, name: str, label: str, hifi: bool) -> tuple:
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
                                          encoding="utf-8") as tmp:
             tmp.write(text)
@@ -488,7 +506,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         finally:
             Path(tmp_path).unlink(missing_ok=True)
         flight.file = name
-        local = _State(flight, config)
+        local = _State(flight, config, hifi=hifi)
         t_max = float(flight.t[-1])
         return (_map_figure(local), _profiles_figure(local), _kpi_children(flight),
                 _readout_children(flight), label, t_max,
@@ -496,10 +514,11 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
                 _engine_payload(local))
 
     @app.callback(*upload_outputs, Input("upload-csv", "data"),
-                  prevent_initial_call=True)
-    def _upload(staged):
+                  State("hifi", "value"), prevent_initial_call=True)
+    def _upload(staged, hifi_value):
         if not staged:
             return (no_update,) * 10
+        hifi = bool(hifi_value)
         name = staged.get("name", "uploaded.csv")
         if staged.get("err") or not staged.get("csv"):
             return _error(name, staged.get("err", "empty file"))
@@ -510,7 +529,9 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         orig, kept = staged.get("orig_rows", 0), staged.get("kept_rows", 0)
         if orig and kept and kept < orig:
             label = f"{name} · downsampled {orig:,} → {kept:,} rows"
-        return _render_text(staged["csv"], name, label)
+        elif hifi and orig:
+            label = f"{name} · full fidelity · {orig:,} rows"
+        return _render_text(staged["csv"], name, label, hifi)
 
     @app.callback(
         Output("map", "figure", allow_duplicate=True),
@@ -526,9 +547,10 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         Input("url-go", "n_clicks"),
         Input("url-in", "n_submit"),
         State("url-in", "value"),
+        State("hifi", "value"),
         prevent_initial_call=True,
     )
-    def _load_url(_clicks, _submit, url):
+    def _load_url(_clicks, _submit, url, hifi_value):
         if not url:
             return (no_update,) * 10
         name = url.rsplit("/", 1)[-1] or "remote log"
@@ -536,7 +558,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
             text = _fetch_log(url, config.upload_max_bytes)
         except Exception as exc:  # noqa: BLE001 - surface fetch errors to the UI
             return _error(name, exc)
-        return _render_text(text, name, name)
+        return _render_text(text, name, name, bool(hifi_value))
 
 
 def run(flight: FlightData | None = None, config: AppConfig | None = None,

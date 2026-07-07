@@ -60,7 +60,7 @@ def test_upload_is_stateless(klv_flight, tmp_path):
     csv_path = generate_sample_flight_data(tmp_path / "other.csv", 5, 1)
     staged = {"name": "other.csv", "csv": csv_path.read_text(),
               "orig_rows": 301, "kept_rows": 301}
-    result = upload_cb(staged)
+    result = upload_cb(staged, [])
     assert result[4] == "other.csv"            # label reflects the new file
 
     # The boot layout served to a fresh visitor still holds the KLV flight.
@@ -68,6 +68,29 @@ def test_upload_is_stateless(klv_flight, tmp_path):
         layout = app.layout
     assert "sample_uav" in str(layout["file-label"].children) or \
            "uav.txt" in str(layout["file-label"].children)
+
+
+def test_hifi_budgets_and_label(klv_flight, tmp_path):
+    """HI-FI keeps every sample in the display/playback arrays and says so."""
+    from flighttracker.sample import generate_sample_flight_data
+    config = AppConfig()
+    fast = _State(klv_flight, config, hifi=False)
+    hifi = _State(klv_flight, config, hifi=True)
+    # 5-min KLV sample has 301 position rows: fast still decimates nothing
+    # here, but the hi-fi budgets must be at least as large.
+    assert hifi.eng_idx.size >= fast.eng_idx.size
+    assert hifi.eng_idx.size == klv_flight.n          # all samples kept
+
+    app = create_app(klv_flight, config)
+    upload_cb = next(e["callback"].__wrapped__ for e in app.callback_map.values()
+                     if [i["id"] + "." + i["property"] for i in e["inputs"]]
+                     == ["upload-csv.data"])
+    csv_path = generate_sample_flight_data(tmp_path / "big.csv", 10, 5)
+    staged = {"name": "big.csv", "csv": csv_path.read_text(),
+              "orig_rows": 3001, "kept_rows": 3001}
+    result = upload_cb(staged, ["on"])
+    assert "full fidelity · 3,001 rows" in result[4]
+    assert len(result[9]["t"]) == 3001                # engine payload complete
 
 
 def test_fetch_log_rejects_bad_urls():

@@ -26,14 +26,19 @@ SPEED_MULTIPLIERS: tuple[int, ...] = (1, 5, 25, 100, 500)
 class AppConfig:
     """Immutable configuration for the dashboard."""
 
-    # Level-of-detail budgets (max points actually drawn). The flight path is
-    # rendered as a cheap polyline plus a much sparser altitude-colored marker
-    # overlay -- large logs are decimated to these budgets, never re-sent.
-    path_line_budget: int = 20_000    # ground-track polyline
-    path_marker_budget: int = 4_000   # altitude-colored marker overlay
-    engine_budget: int = 6_000        # profiles + client-side playback arrays
-    upload_max_rows: int = 50_000     # larger uploads are decimated in-browser
-    upload_max_bytes: int = 15_000_000  # staged-text / remote-fetch size cap
+    # Level-of-detail budgets (max points actually drawn), as
+    # (fast, hi-fi) pairs. Fast mode favors rendering speed; HI-FI mode is
+    # for fidelity/performance testing with large files. Response
+    # compression (Brotli) is lossless and unrelated to these budgets.
+    path_line_budget: tuple[int, int] = (20_000, 1_000_000)   # ground track
+    path_marker_budget: tuple[int, int] = (4_000, 30_000)     # colored overlay
+    engine_budget: tuple[int, int] = (6_000, 250_000)         # playback arrays
+    profile_budget: tuple[int, int] = (6_000, 20_000)         # SVG mini-charts
+
+    # In fast mode, uploads above this row/frame count are stride-decimated
+    # in the browser before anything crosses the network; HI-FI disables it.
+    upload_max_rows: int = 50_000
+    upload_max_bytes: int = 80_000_000  # staged-text / remote-fetch size cap
 
     # Theme colors (General Atomics-style navy / blue).
     bg: str = "#0A1526"            # app background
