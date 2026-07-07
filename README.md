@@ -21,6 +21,10 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 
 - **Interactive world map** (Plotly / MapLibre) — pan/zoom, switchable token-free
   basemaps, flight path colored by altitude with a colorbar.
+- **Multi-flight roster** — load up to 4 files (upload or URL); each becomes a
+  header chip. The ACTIVE flight renders at full brightness with the altitude
+  overlay, aircraft icon and playback; the others stay visible as dimmed
+  altitude-colored previews. Switching is instant and fully client-side.
 - **Smooth aircraft tracking** — the vehicle state (position, altitude, speed,
   heading) is interpolated between samples every frame, so the marker glides
   along the trajectory at any data rate; **Follow** mode turns the map into a

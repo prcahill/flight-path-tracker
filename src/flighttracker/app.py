@@ -1,24 +1,19 @@
-"""Dash + Plotly dashboard for replaying a flight path.
+"""Dash + Plotly dashboard for replaying aircraft flight paths.
 
-Builds an enterprise-style dark dashboard: KPI cards, an interactive world map
-(altitude-colored path + animated aircraft marker), synced altitude/speed
-profiles, and playback controls (play/pause, speed, scrubber).
+Builds an enterprise-style dark dashboard: KPI cards, an interactive world map,
+synced altitude/speed profiles, and playback controls — with a multi-flight
+roster (up to 4 loaded files).
 
 Architecture
 ------------
-Playback runs **entirely client-side** (``assets/engine.js``): the decimated
-flight arrays are shipped once in a ``dcc.Store`` and a requestAnimationFrame
-loop interpolates the aircraft state at 60 fps, writing positions straight
-into the MapLibre GeoJSON sources and the readout DOM. No network requests
-occur during playback, so the app behaves identically on localhost and on a
-remote host regardless of latency, the map stays fully draggable while the
-flight plays, and each visitor gets an independent playback session. The
-server's responsibilities are reduced to building the initial figures and
-parsing uploaded CSVs.
-
-The flight path itself is decimated to two display budgets (a cheap
-ground-track polyline plus a sparse altitude-colored marker overlay) so very
-large logs render instantly.
+The server is **stateless per visitor** and its responses are small: loading a
+file returns one *flight package* (decimated arrays + display geometry + KPI
+strings). Everything on the map is rendered by the client engine
+(``assets/engine.js``) as native MapLibre layers — the active flight at full
+brightness with the altitude-colored overlay, aircraft icon and sensor
+stare-point; other roster flights as dimmed altitude-colored previews.
+Switching the active flight, playback, exports and segment analytics are all
+client-side and instant. Response compression (Brotli) is lossless.
 """
 
 from __future__ import annotations
@@ -33,10 +28,42 @@ from plotly.subplots import make_subplots
 
 from .config import AppConfig
 from .data import load_flight_data
-from .metrics import FlightData, compass_point, format_duration
+from .metrics import FlightData
 
-# Map trace indices (order matters: engine.js updates traces 2..5).
-_LINE, _COLOR, _HALO, _DOT, _STARE_LINE, _STARE_PT = 0, 1, 2, 3, 4, 5
+_KPI_LABELS = ("Distance", "Duration", "Samples", "Data rate", "Max altitude",
+               "Cruise", "Max / avg speed", "Max climb / descent")
+
+# Readout rows: (wrapper id, value id, label, optional).
+_READOUT_ROWS = (
+    ("rrow-time", "rd-time", "Time", False),
+    ("rrow-pos", "rd-pos", "Position", False),
+    ("rrow-alt", "rd-alt", "Altitude", False),
+    ("rrow-gs", "rd-gs", "Ground speed", False),
+    ("rrow-hdg", "rd-hdg", "Heading", False),
+    ("rrow-vs", "rd-vs", "Vertical speed", False),
+    ("rrow-dist", "rd-dist", "Distance flown", False),
+    ("rrow-pitch", "rd-pitch", "Pitch", True),
+    ("rrow-roll", "rd-roll", "Roll", True),
+    ("rrow-slant", "rd-slant", "Slant range", True),
+)
+
+# Google Turbo colormap polynomial (ascending coefficients).
+_TURBO = {
+    "r": (0.13572138, 4.61539260, -42.66032258, 132.13108234, -152.94239396, 59.28637943),
+    "g": (0.09140261, 2.19418839, 4.84296658, -14.18503333, 4.27729857, 2.82956604),
+    "b": (0.10667330, 12.64194608, -60.58204836, 110.36276771, -89.90310912, 27.34824973),
+}
+
+
+def _turbo_hex(x: np.ndarray) -> list[str]:
+    """Vectorized Turbo colormap: normalized values -> hex colors."""
+    x = np.clip(np.asarray(x, dtype=float), 0.0, 1.0)
+    chans = []
+    for key in ("r", "g", "b"):
+        val = np.clip(np.polyval(_TURBO[key][::-1], x), 0.0, 1.0)
+        chans.append((val * 255).astype(int))
+    return [f"#{r:02x}{g:02x}{b:02x}"
+            for r, g, b in zip(chans[0], chans[1], chans[2], strict=True)]
 
 
 def _decimate(n: int, budget: int) -> np.ndarray:
@@ -83,7 +110,7 @@ def _fetch_log(url: str, max_bytes: int) -> str:
 
 
 class _State:
-    """Server-side holder for the loaded flight and precomputed display arrays."""
+    """Precomputed decimations for one flight at the chosen fidelity."""
 
     def __init__(self, flight: FlightData | None, config: AppConfig,
                  hifi: bool = False):
@@ -97,38 +124,59 @@ class _State:
             return
         c = self.config
         b = 1 if self.hifi else 0
-        li = _decimate(flight.n, c.path_line_budget[b])
-        self.line_lat = flight.lat[li]
-        self.line_lon = flight.lon[li]
-        mi = _decimate(flight.n, c.path_marker_budget[b])
-        self.mark_lat = flight.lat[mi]
-        self.mark_lon = flight.lon[mi]
-        self.mark_alt = flight.alt[mi]
+        self.line_idx = _decimate(flight.n, c.path_line_budget[b])
+        self.mark_idx = _decimate(flight.n, c.path_marker_budget[b])
         self.eng_idx = _decimate(flight.n, c.engine_budget[b])
-        self.prof_idx = _decimate(flight.n, c.profile_budget[b])
 
 
-def _engine_payload(state: _State) -> dict:
-    """Decimated flight arrays + metadata consumed by ``assets/engine.js``.
+def _kpi_values(f: FlightData) -> list[str]:
+    s = f.summary
+    return [
+        f"{s.distance_nm:.1f} nm",
+        s.duration,
+        _fmt_int(s.num_points),
+        f"{s.data_rate_hz:.1f} Hz",
+        f"{_fmt_int(s.max_alt_ft)} ft",
+        f"{_fmt_int(s.cruise_alt_ft)} ft",
+        f"{s.max_speed_kt:.0f} / {s.avg_speed_kt:.0f} kt",
+        f"{_fmt_int(s.max_climb_fpm)} / {_fmt_int(s.max_descent_fpm)} fpm",
+    ]
 
-    HI-FI mode carries more points (see ``AppConfig.engine_budget``) and one
-    extra digit of position/time precision.
+
+def _zoom_for(lat_lim, lon_lim) -> float:
+    import math
+    lat_span = max(lat_lim[1] - lat_lim[0], 1e-3)
+    lon_span = max(lon_lim[1] - lon_lim[0], 1e-3)
+    z = min(math.log2(360.0 / lon_span), math.log2(180.0 / lat_span)) - 0.6
+    return float(max(1.0, min(16.0, z)))
+
+
+def _flight_package(state: _State, label: str | None = None) -> dict:
+    """One flight, fully described for the client engine.
+
+    Contains playback arrays (engine budget), map display geometry (line +
+    altitude-colored markers at the display budgets), KPI strings and metadata.
     """
     f = state.flight
     c = state.config
     i = state.eng_idx
-    xp = 1 if state.hifi else 0   # extra precision in hi-fi mode
+    xp = 1 if state.hifi else 0
     lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
     rnd = lambda a, p: np.round(a[i], p + xp).tolist()  # noqa: E731
 
     def opt(a: np.ndarray | None, p: int) -> list | None:
-        """Optional channel: None if absent; NaN entries become JSON nulls."""
         if a is None:
             return None
         vals = np.round(a[i], p)
         return [float(v) if np.isfinite(v) else None for v in vals]
 
+    li, mi = state.line_idx, state.mark_idx
+    alt_min, alt_max = float(f.alt.min()), float(f.alt.max())
+    span = max(alt_max - alt_min, 1.0)
+    name = Path(f.file).name if f.file else "flight"
     return {
+        "name": name,
+        "label": label or name,
         "t": rnd(f.t, 2),
         "lat": rnd(f.lat, 5),
         "lon": rnd(f.lon, 5),
@@ -142,6 +190,14 @@ def _engine_payload(state: _State) -> dict:
         "slant": opt(f.slant_ft, 0),
         "fc_lat": opt(f.fc_lat, 5),
         "fc_lon": opt(f.fc_lon, 5),
+        "map": {
+            "line_lat": np.round(f.lat[li], 5).tolist(),
+            "line_lon": np.round(f.lon[li], 5).tolist(),
+            "mk_lat": np.round(f.lat[mi], 5).tolist(),
+            "mk_lon": np.round(f.lon[mi], 5).tolist(),
+            "mk_color": _turbo_hex((f.alt[mi] - alt_min) / span),
+        },
+        "kpis": _kpi_values(f),
         "meta": {
             "duration_s": float(f.t[-1]),
             "t0_ms": int(f.t0.timestamp() * 1000) if f.t0 else None,
@@ -149,94 +205,43 @@ def _engine_payload(state: _State) -> dict:
             "fit_zoom": _zoom_for(lat_lim, lon_lim),
             "center_lat": float(np.mean(lat_lim)),
             "center_lon": float(np.mean(lon_lim)),
+            "alt_min": alt_min,
+            "alt_max": alt_max,
         },
     }
 
 
 # --------------------------------------------------------------------------- #
-#  Figure builders
+#  Layout shells (all flight content is drawn by the client engine)
 # --------------------------------------------------------------------------- #
-def _map_figure(state: _State) -> go.Figure:
-    f = state.flight
-    c = state.config
+def _map_shell(config: AppConfig) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scattermap(
-        lat=state.line_lat, lon=state.line_lon, mode="lines",
-        line=dict(width=1.5, color="rgba(255,255,255,0.20)"),
-        hoverinfo="skip", name="track",
-    ))
-    fig.add_trace(go.Scattermap(
-        lat=state.mark_lat, lon=state.mark_lon, mode="markers",
-        marker=dict(size=5, color=state.mark_alt, colorscale=c.colorscale,
-                    showscale=True,
-                    colorbar=dict(
-                        title=dict(text="ALT (FT)", font=dict(color=c.muted, size=10)),
-                        tickfont=dict(color=c.muted, size=9),
-                        thickness=8, len=0.7, x=0.99, xanchor="right",
-                        y=0.98, yanchor="top", outlinewidth=0, ticklen=3,
-                        bgcolor="rgba(10,21,38,0.55)",
-                    )),
-        customdata=state.mark_alt,
-        hovertemplate="%{customdata:,.0f} ft<extra></extra>",
-        name="altitude",
-    ))
-    fig.add_trace(go.Scattermap(
-        lat=[float(f.lat[0])], lon=[float(f.lon[0])], mode="markers",
-        marker=dict(size=24, color=c.halo), hoverinfo="skip", name="halo",
-    ))
-    fig.add_trace(go.Scattermap(
-        lat=[float(f.lat[0])], lon=[float(f.lon[0])], mode="markers",
-        marker=dict(size=11, color=c.cursor), hoverinfo="skip", name="aircraft",
-    ))
-    # Sensor stare-point traces (populated by the engine for KLV data with
-    # frame-center tags; empty otherwise).
-    fig.add_trace(go.Scattermap(
-        lat=[], lon=[], mode="lines",
-        line=dict(width=1.5, color=c.stare), hoverinfo="skip", name="stare-line",
-    ))
-    fig.add_trace(go.Scattermap(
-        lat=[], lon=[], mode="markers",
-        marker=dict(size=9, color=c.stare), hoverinfo="skip", name="stare-point",
-    ))
-    lat_lim, lon_lim = f.summary.lat_lim, f.summary.lon_lim
+    # One empty map-type trace is required for plotly to instantiate the
+    # MapLibre subplot at all; the engine draws everything as native layers.
+    fig.add_trace(go.Scattermap(lat=[], lon=[], mode="markers", hoverinfo="skip"))
     fig.update_layout(
-        map=dict(
-            style=c.default_style,
-            center=dict(lat=float(np.mean(lat_lim)), lon=float(np.mean(lon_lim))),
-            zoom=_zoom_for(lat_lim, lon_lim),
-        ),
+        map=dict(style=config.default_style, center=dict(lat=30, lon=-40), zoom=1.4),
         margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor=c.panel, uirevision="keep", showlegend=False,
+        paper_bgcolor=config.panel, uirevision="keep", showlegend=False,
     )
     return fig
 
 
-def _zoom_for(lat_lim, lon_lim) -> float:
-    import math
-    lat_span = max(lat_lim[1] - lat_lim[0], 1e-3)
-    lon_span = max(lon_lim[1] - lon_lim[0], 1e-3)
-    z = min(math.log2(360.0 / lon_span), math.log2(180.0 / lat_span)) - 0.6
-    return float(max(1.0, min(16.0, z)))
-
-
-def _profiles_figure(state: _State) -> go.Figure:
-    f = state.flight
-    c = state.config
-    i = state.prof_idx
-    prof_t = f.t[i] / 60.0
+def _profiles_shell(config: AppConfig) -> go.Figure:
+    c = config
     cm = dict(color=c.cursor, size=8, line=dict(color=c.accent, width=2))
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.16,
                         subplot_titles=("ALTITUDE (FT)", "GROUND SPEED (KT)"))
-    fig.add_trace(go.Scatter(x=prof_t, y=f.alt[i], mode="lines",
+    fig.add_trace(go.Scatter(x=[], y=[], mode="lines",
                              line=dict(color=c.color_alt, width=1.5), hoverinfo="skip"),
                   row=1, col=1)
-    fig.add_trace(go.Scatter(x=[0.0], y=[float(f.alt[0])], mode="markers",
-                             marker=cm, hoverinfo="skip"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=prof_t, y=f.gs[i], mode="lines",
+    fig.add_trace(go.Scatter(x=[], y=[], mode="markers", marker=cm,
+                             hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=[], y=[], mode="lines",
                              line=dict(color=c.color_speed, width=1.5), hoverinfo="skip"),
                   row=2, col=1)
-    fig.add_trace(go.Scatter(x=[0.0], y=[float(f.gs[0])], mode="markers",
-                             marker=cm, hoverinfo="skip"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=[], y=[], mode="markers", marker=cm,
+                             hoverinfo="skip"), row=2, col=1)
     fig.update_xaxes(gridcolor=c.grid, zeroline=False, tickfont=dict(size=10))
     fig.update_yaxes(gridcolor=c.grid, zeroline=False, tickfont=dict(size=10))
     fig.update_xaxes(title_text="TIME (MIN)", title_font=dict(size=10, color=c.muted),
@@ -250,53 +255,27 @@ def _profiles_figure(state: _State) -> go.Figure:
         margin=dict(l=46, r=14, t=24, b=34),
         paper_bgcolor=c.panel, plot_bgcolor=c.panel, font=dict(color=c.muted),
         height=300, uirevision="keep",
-        dragmode="select", selectdirection="h",   # drag = segment analytics
+        dragmode="select", selectdirection="h",
     )
     return fig
 
 
-def _kpi_children(f: FlightData) -> list:
-    s = f.summary
-    cards = [
-        ("Distance", f"{s.distance_nm:.1f} nm"),
-        ("Duration", s.duration),
-        ("Samples", _fmt_int(s.num_points)),
-        ("Data rate", f"{s.data_rate_hz:.1f} Hz"),
-        ("Max altitude", f"{_fmt_int(s.max_alt_ft)} ft"),
-        ("Cruise", f"{_fmt_int(s.cruise_alt_ft)} ft"),
-        ("Max / avg speed", f"{s.max_speed_kt:.0f} / {s.avg_speed_kt:.0f} kt"),
-        ("Max climb / descent", f"{_fmt_int(s.max_climb_fpm)} / {_fmt_int(s.max_descent_fpm)} fpm"),
-    ]
+def _kpi_skeleton() -> list:
     return [html.Div(className="kpi", children=[
         html.Div(label, className="kpi-label"),
-        html.Div(value, className="kpi-value"),
-    ]) for label, value in cards]
+        html.Div("—", className="kpi-value", id=f"kpi-v-{i}"),
+    ]) for i, label in enumerate(_KPI_LABELS)]
 
 
-def _readout_children(f: FlightData) -> list:
-    """Initial readout rows; the value spans carry ids engine.js writes into."""
-    rows = [
-        ("rd-time", "Time", format_duration(0)),
-        ("rd-pos", "Position", f"{f.lat[0]:.4f}°, {f.lon[0]:.4f}°"),
-        ("rd-alt", "Altitude", f"{_fmt_int(f.alt[0])} ft"),
-        ("rd-gs", "Ground speed", f"{f.gs[0]:.0f} kt"),
-        ("rd-hdg", "Heading", f"{f.hdg[0]:03.0f}°  {compass_point(f.hdg[0])}"),
-        ("rd-vs", "Vertical speed", f"{_fmt_int(f.vs[0])} ft/min"),
-        ("rd-dist", "Distance flown", f"{f.cum_nm[0]:.1f} nm"),
-    ]
-    # Attitude / sensor rows only when the source format carries them (KLV).
-    if f.pitch is not None:
-        rows.append(("rd-pitch", "Pitch", f"{f.pitch[0]:+.1f}°"))
-    if f.roll is not None:
-        rows.append(("rd-roll", "Roll", f"{f.roll[0]:+.1f}°"))
-    if f.slant_ft is not None:
-        first = f.slant_ft[0]
-        rows.append(("rd-slant", "Slant range",
-                     f"{_fmt_int(first)} ft" if np.isfinite(first) else "—"))
-    return [html.Div(className="rd-row", children=[
-        html.Span(label, className="rd-label"),
-        html.Span(value, className="rd-value", id=rid),
-    ]) for rid, label, value in rows]
+def _readout_skeleton() -> list:
+    rows = []
+    for wrap_id, val_id, label, optional in _READOUT_ROWS:
+        style = {"display": "none"} if optional else None
+        rows.append(html.Div(className="rd-row", id=wrap_id, style=style, children=[
+            html.Span(label, className="rd-label"),
+            html.Span("—", className="rd-value", id=val_id),
+        ]))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -304,14 +283,13 @@ def _readout_children(f: FlightData) -> list:
 # --------------------------------------------------------------------------- #
 def create_app(flight: FlightData | None = None, config: AppConfig | None = None) -> Dash:
     config = config or AppConfig()
-    state = _State(flight, config)
 
     app = Dash(
         __name__,
         assets_folder=str(Path(__file__).parent / "assets"),
         title="Flight Path Tracker",
         update_title=None,
-        compress=True,   # Brotli/gzip via flask-compress: ~5-10x smaller payloads
+        compress=True,
     )
     app.server.config["MAX_CONTENT_LENGTH"] = 160 * 1024 * 1024
 
@@ -320,8 +298,9 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         from . import __version__
         return {"status": "ok", "version": __version__}
 
-    file_label = Path(flight.file).name if flight and flight.file else "no file loaded"
-    t_max = float(flight.t[-1]) if flight else 1.0
+    boot_package = None
+    if flight is not None:
+        boot_package = _flight_package(_State(flight, config))
 
     app.layout = html.Div(className="app", children=[
         # Header
@@ -333,7 +312,8 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
                     html.Div("TELEMETRY REPLAY CONSOLE", className="subtitle"),
                 ]),
             ]),
-            html.Div(id="file-label", className="chip", children=file_label),
+            html.Div(id="roster", className="roster"),
+            html.Div(id="file-label", className="chip status"),
             html.Div(className="header-controls", children=[
                 dcc.Input(id="url-in", type="url", className="url-in", debounce=True,
                           placeholder="https://…  log URL"),
@@ -351,31 +331,38 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
                              id="hifi", className="follow",
                              options=[{"label": "HI-FI", "value": "on"}], value=[])),
                 dcc.Upload(id="upload", className="upload",
-                           children=html.Div("⬆ LOAD FILE"), multiple=False),
+                           children=html.Div("⬆ ADD FILE"), multiple=False),
             ]),
         ]),
 
-        # KPI cards
-        html.Div(id="kpis", className="kpis",
-                 children=_kpi_children(flight) if flight else []),
+        # KPI cards (engine fills the values for the active flight)
+        html.Div(id="kpis", className="kpis", children=_kpi_skeleton()),
 
         # Main: map | side panel
         html.Div(className="main", children=[
             html.Div(className="map-wrap", children=[
                 dcc.Graph(id="map", className="map",
                           config={"displayModeBar": False, "scrollZoom": True},
-                          figure=_map_figure(state) if flight else go.Figure()),
+                          figure=_map_shell(config)),
+                html.Div(className="alt-legend", id="alt-legend",
+                         style={"display": "none"}, children=[
+                    html.Span("—", id="leg-max", className="leg-lab"),
+                    html.Div(className="leg-bar"),
+                    html.Span("—", id="leg-min", className="leg-lab"),
+                    html.Span("ALT FT", className="leg-title"),
+                ]),
             ]),
             html.Div(className="side", children=[
                 html.Div(className="panel", children=[
                     html.Div("LIVE TELEMETRY", className="panel-title"),
                     html.Div(id="readout", className="readout",
-                             children=_readout_children(flight) if flight else []),
+                             children=_readout_skeleton()),
                 ]),
                 dcc.Graph(id="profiles", className="profiles",
                           config={"displayModeBar": False},
-                          figure=_profiles_figure(state) if flight else go.Figure()),
-                html.Div(id="seg-stats", className="seg-stats"),
+                          figure=_profiles_shell(config)),
+                html.Div(id="seg-stats", className="seg-stats",
+                         title="Drag horizontally across a profile to analyze a segment"),
             ]),
         ]),
 
@@ -385,30 +372,27 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             dcc.Dropdown(id="speed", className="dd speed", clearable=False,
                          options=[{"label": f"{m}×", "value": m} for m in config.speed_multipliers],
                          value=25),
-            dcc.Slider(id="scrub", min=0, max=t_max, value=0,
-                       step=max(0.1, round(t_max / 2000.0, 2)),
+            dcc.Slider(id="scrub", min=0, max=1, value=0, step=0.1,
                        marks=None, updatemode="drag", included=True),
             html.Button("KML", id="export-kml", className="ghost"),
             html.Button("GPX", id="export-gpx", className="ghost"),
             html.Div(id="clock", className="clock", children="00:00:00 / 00:00:00"),
         ]),
 
-        # Client-side playback engine data + dummy ack target.
-        dcc.Store(id="engine-data", data=_engine_payload(state) if flight else None),
+        # Flight packages travel through this store; the engine keeps a roster.
+        dcc.Store(id="engine-data", data=boot_package),
         dcc.Store(id="cs-ack"),
-        # Upload staging: the browser decodes (and, for very large files,
-        # decimates) the CSV before it is sent to the server for parsing.
         dcc.Store(id="upload-csv"),
     ])
 
-    _register_callbacks(app, state, config)
+    _register_callbacks(app, config)
     return app
 
 
-def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
-    # ---- clientside: wire controls to the playback engine (assets/engine.js)
+def _register_callbacks(app: Dash, config: AppConfig) -> None:
+    # ---- clientside: engine wiring -----------------------------------------
     app.clientside_callback(
-        "function(data){ if (window.FT) { window.FT.load(data); } return null; }",
+        "function(pkg){ if (window.FT) { window.FT.load(pkg); } return null; }",
         Output("cs-ack", "data"),
         Input("engine-data", "data"),
     )
@@ -443,18 +427,6 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         prevent_initial_call=True,
     )
     app.clientside_callback(
-        "function(c, f, h){ var lossless = h && h.length > 0; "
-        "return window.FT ? window.FT.prepUpload(c, f, "
-        f"lossless ? 1e12 : {config.upload_max_rows}) : null; }}",
-        Output("upload-csv", "data"),
-        Input("upload", "contents"),
-        State("upload", "filename"),
-        State("hifi", "value"),
-        prevent_initial_call=True,
-    )
-
-    # ---- clientside: segment analytics + track exports ---------------------
-    app.clientside_callback(
         "function(sel){ return window.FT ? window.FT.segmentStats(sel) : ''; }",
         Output("seg-stats", "children"),
         Input("profiles", "selectedData"),
@@ -472,27 +444,30 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         Input("export-gpx", "n_clicks"),
         prevent_initial_call=True,
     )
+    app.clientside_callback(
+        "function(c, f, h){ var lossless = h && h.length > 0; "
+        "return window.FT ? window.FT.prepUpload(c, f, "
+        f"lossless ? 1e12 : {config.upload_max_rows}) : null; }}",
+        Output("upload-csv", "data"),
+        Input("upload", "contents"),
+        State("upload", "filename"),
+        State("hifi", "value"),
+        prevent_initial_call=True,
+    )
 
-    # ---- server: parse a flight and render the full response --------------
-    # Stateless on purpose: a local _State is built per request and the
-    # module-level boot state is never mutated, so each visitor's upload is
-    # isolated (new page loads always get the boot flight).
-    upload_outputs = (
-        Output("map", "figure"),
-        Output("profiles", "figure"),
-        Output("kpis", "children"),
-        Output("readout", "children"),
-        Output("file-label", "children"),
+    # ---- server: parse a flight and return its package ---------------------
+    load_outputs = (
+        Output("engine-data", "data"),
         Output("scrub", "max"),
         Output("scrub", "step"),
         Output("scrub", "value"),
         Output("play", "children", allow_duplicate=True),
-        Output("engine-data", "data"),
+        Output("file-label", "children"),
     )
 
     def _error(name: str, err: object) -> tuple:
-        return (no_update, no_update, no_update, no_update, f"⚠ {name}: {err}",
-                no_update, no_update, no_update, no_update, no_update)
+        return (no_update, no_update, no_update, no_update, no_update,
+                f"⚠ {name}: {err}")
 
     def _render_text(text: str, name: str, label: str, hifi: bool) -> tuple:
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
@@ -508,16 +483,14 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         flight.file = name
         local = _State(flight, config, hifi=hifi)
         t_max = float(flight.t[-1])
-        return (_map_figure(local), _profiles_figure(local), _kpi_children(flight),
-                _readout_children(flight), label, t_max,
-                max(0.1, round(t_max / 2000.0, 2)), 0.0, "▶  PLAY",
-                _engine_payload(local))
+        return (_flight_package(local, label), t_max,
+                max(0.1, round(t_max / 2000.0, 2)), 0.0, "▶  PLAY", "")
 
-    @app.callback(*upload_outputs, Input("upload-csv", "data"),
+    @app.callback(*load_outputs, Input("upload-csv", "data"),
                   State("hifi", "value"), prevent_initial_call=True)
     def _upload(staged, hifi_value):
         if not staged:
-            return (no_update,) * 10
+            return (no_update,) * 6
         hifi = bool(hifi_value)
         name = staged.get("name", "uploaded.csv")
         if staged.get("err") or not staged.get("csv"):
@@ -534,16 +507,12 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
         return _render_text(staged["csv"], name, label, hifi)
 
     @app.callback(
-        Output("map", "figure", allow_duplicate=True),
-        Output("profiles", "figure", allow_duplicate=True),
-        Output("kpis", "children", allow_duplicate=True),
-        Output("readout", "children", allow_duplicate=True),
-        Output("file-label", "children", allow_duplicate=True),
+        Output("engine-data", "data", allow_duplicate=True),
         Output("scrub", "max", allow_duplicate=True),
         Output("scrub", "step", allow_duplicate=True),
         Output("scrub", "value", allow_duplicate=True),
         Output("play", "children", allow_duplicate=True),
-        Output("engine-data", "data", allow_duplicate=True),
+        Output("file-label", "children", allow_duplicate=True),
         Input("url-go", "n_clicks"),
         Input("url-in", "n_submit"),
         State("url-in", "value"),
@@ -552,7 +521,7 @@ def _register_callbacks(app: Dash, state: _State, config: AppConfig) -> None:
     )
     def _load_url(_clicks, _submit, url, hifi_value):
         if not url:
-            return (no_update,) * 10
+            return (no_update,) * 6
         name = url.rsplit("/", 1)[-1] or "remote log"
         try:
             text = _fetch_log(url, config.upload_max_bytes)

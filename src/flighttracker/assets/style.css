@@ -90,6 +90,98 @@ body {
     white-space: nowrap;
     max-width: 340px;
 }
+.chip.status { color: #FF8A8A; border-color: rgba(255,138,138,0.4); }
+.chip.status:empty { display: none; }
+
+/* ---------- Flight roster ---------- */
+.roster {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow-x: auto;
+    max-width: 40vw;
+    padding: 2px;
+}
+.fchip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 10px 0 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--muted);
+    transition: border-color 120ms, background 120ms, color 120ms;
+}
+.fchip:hover { border-color: var(--accent); }
+.fchip.on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+.fchip-tag {
+    background: rgba(255,255,255,0.12);
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+.fchip.on .fchip-tag { background: rgba(255,255,255,0.22); }
+.fchip-name {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.fchip-x {
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 50%;
+    opacity: 0.7;
+}
+.fchip-x:hover { background: rgba(255,80,80,0.35); opacity: 1; }
+
+/* ---------- Altitude legend (map overlay) ---------- */
+.map-wrap { position: relative; }
+.alt-legend {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    background: rgba(10, 21, 38, 0.72);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 7px;
+    z-index: 5;
+}
+.leg-bar {
+    width: 10px;
+    height: 130px;
+    border-radius: 5px;
+    background: linear-gradient(to top,
+        #30123b, #4145ab, #4675ed, #39a2fc, #1bcfd4, #24eca6,
+        #61fc6c, #a4fc3b, #d1e834, #f3c63a, #fe9b2d, #f36315,
+        #d93806, #b11901, #7a0402);
+}
+.leg-lab {
+    color: var(--text);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+.leg-title {
+    color: var(--muted);
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+}
 .header-controls {
     margin-left: auto;
     display: flex;

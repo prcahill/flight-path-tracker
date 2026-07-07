@@ -1,4 +1,4 @@
-"""Tests for the app factory: health endpoint, payload, isolation, URL guards."""
+"""Tests for the app factory: health endpoint, packages, isolation, URL guards."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from flighttracker import AppConfig, load_flight_data
-from flighttracker.app import _engine_payload, _fetch_log, _State, create_app
+from flighttracker.app import _fetch_log, _flight_package, _State, create_app
 from flighttracker.sample import generate_sample_klv_text
 
 
@@ -32,19 +32,22 @@ def test_compression_enabled(klv_flight):
     assert resp.headers.get("Content-Encoding") == "br"
 
 
-def test_engine_payload_optional_channels(klv_flight):
+def test_flight_package_contents(klv_flight):
     st = _State(klv_flight, AppConfig())
-    payload = _engine_payload(st)
-    # KLV sample carries attitude + sensor pointing.
-    assert payload["pitch"] is not None
-    assert payload["slant"] is not None and payload["fc_lat"] is not None
-    # Early frames may predate the first stare report -> JSON nulls, not NaN.
-    for arr in (payload["slant"], payload["fc_lat"], payload["fc_lon"]):
+    pkg = _flight_package(st)
+    # Playback arrays + optional channels from the KLV sample.
+    assert len(pkg["t"]) == len(pkg["lat"]) == len(pkg["alt"])
+    assert pkg["pitch"] is not None and pkg["slant"] is not None
+    for arr in (pkg["slant"], pkg["fc_lat"], pkg["fc_lon"]):
         assert all(v is None or np.isfinite(v) for v in arr)
-    # Map figure has the 6-trace layout the engine expects.
-    from flighttracker.app import _map_figure
-    assert [tr.name for tr in _map_figure(st).data] == [
-        "track", "altitude", "halo", "aircraft", "stare-line", "stare-point"]
+    # Display geometry: altitude-colored markers with one hex color per point.
+    m = pkg["map"]
+    assert len(m["mk_lat"]) == len(m["mk_lon"]) == len(m["mk_color"])
+    assert all(c.startswith("#") and len(c) == 7 for c in m["mk_color"][:50])
+    # KPI strings and metadata for the client legend.
+    assert len(pkg["kpis"]) == 8
+    assert pkg["meta"]["alt_max"] > pkg["meta"]["alt_min"]
+    assert pkg["name"] == "uav.txt"
 
 
 def test_upload_is_stateless(klv_flight, tmp_path):
@@ -53,33 +56,31 @@ def test_upload_is_stateless(klv_flight, tmp_path):
     config = AppConfig()
     app = create_app(klv_flight, config)
 
-    # Find the upload callback and feed it a staged CSV, as the browser would.
     upload_cb = next(e["callback"].__wrapped__ for e in app.callback_map.values()
                      if [i["id"] + "." + i["property"] for i in e["inputs"]]
                      == ["upload-csv.data"])
     csv_path = generate_sample_flight_data(tmp_path / "other.csv", 5, 1)
     staged = {"name": "other.csv", "csv": csv_path.read_text(),
               "orig_rows": 301, "kept_rows": 301}
-    result = upload_cb(staged, [])
-    assert result[4] == "other.csv"            # label reflects the new file
+    package, t_max, _step, value, play, status = upload_cb(staged, [])
+    assert package["name"] == "other.csv"
+    assert value == 0.0 and play == "▶  PLAY" and status == ""
+    assert t_max == pytest.approx(300.0, rel=0.01)
 
     # The boot layout served to a fresh visitor still holds the KLV flight.
     with app.server.test_request_context("/"):
         layout = app.layout
-    assert "sample_uav" in str(layout["file-label"].children) or \
-           "uav.txt" in str(layout["file-label"].children)
+    assert layout["engine-data"].data["name"] == "uav.txt"
 
 
 def test_hifi_budgets_and_label(klv_flight, tmp_path):
-    """HI-FI keeps every sample in the display/playback arrays and says so."""
+    """HI-FI keeps every sample in the playback arrays and says so."""
     from flighttracker.sample import generate_sample_flight_data
     config = AppConfig()
     fast = _State(klv_flight, config, hifi=False)
     hifi = _State(klv_flight, config, hifi=True)
-    # 5-min KLV sample has 301 position rows: fast still decimates nothing
-    # here, but the hi-fi budgets must be at least as large.
     assert hifi.eng_idx.size >= fast.eng_idx.size
-    assert hifi.eng_idx.size == klv_flight.n          # all samples kept
+    assert hifi.eng_idx.size == klv_flight.n
 
     app = create_app(klv_flight, config)
     upload_cb = next(e["callback"].__wrapped__ for e in app.callback_map.values()
@@ -89,8 +90,8 @@ def test_hifi_budgets_and_label(klv_flight, tmp_path):
     staged = {"name": "big.csv", "csv": csv_path.read_text(),
               "orig_rows": 3001, "kept_rows": 3001}
     result = upload_cb(staged, ["on"])
-    assert "full fidelity · 3,001 rows" in result[4]
-    assert len(result[9]["t"]) == 3001                # engine payload complete
+    assert "full fidelity · 3,001 rows" in result[0]["label"]
+    assert len(result[0]["t"]) == 3001
 
 
 def test_fetch_log_rejects_bad_urls():
@@ -131,6 +132,6 @@ def test_klv_sensor_tags(tmp_path):
     p.write_text(text)
     fd = load_klv_text(p)
     assert fd.slant_ft is not None and fd.fc_lat is not None
-    assert np.isnan(fd.slant_ft[0])                       # before first report
+    assert np.isnan(fd.slant_ft[0])
     assert fd.slant_ft[1] == pytest.approx(500 * 3.280839895, rel=1e-6)
-    assert fd.fc_lat[2] == pytest.approx(33.8460)          # forward-filled
+    assert fd.fc_lat[2] == pytest.approx(33.8460)
