@@ -80,35 +80,6 @@ def _fmt_int(x: float) -> str:
     return f"{int(round(x)):,}"
 
 
-def _fetch_log(url: str, max_bytes: int) -> str:
-    """Fetch a remote log with SSRF and size guards (https-only, public hosts)."""
-    import ipaddress
-    import socket
-    from urllib.parse import urlparse
-
-    import requests
-
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise ValueError("only https:// URLs are allowed")
-    host = parsed.hostname or ""
-    for info in socket.getaddrinfo(host, None):
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            raise ValueError("URL resolves to a non-public address")
-    resp = requests.get(url, timeout=15, stream=True,
-                        headers={"User-Agent": "flight-path-tracker"})
-    resp.raise_for_status()
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in resp.iter_content(chunk_size=1 << 16):
-        total += len(chunk)
-        if total > max_bytes:
-            raise ValueError(f"remote file exceeds the {max_bytes // 1_000_000} MB limit")
-        chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", errors="replace")
-
-
 class _State:
     """Precomputed decimations for one flight at the chosen fidelity."""
 
@@ -315,9 +286,6 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             html.Div(id="roster", className="roster"),
             html.Div(id="file-label", className="chip status"),
             html.Div(className="header-controls", children=[
-                dcc.Input(id="url-in", type="url", className="url-in", debounce=True,
-                          placeholder="https://…  log URL"),
-                html.Button("GO", id="url-go", className="ghost go"),
                 dcc.Dropdown(id="basemap", className="dd",
                              options=[{"label": s, "value": s} for s in config.basemap_styles],
                              value=config.default_style, clearable=False),
@@ -505,29 +473,6 @@ def _register_callbacks(app: Dash, config: AppConfig) -> None:
         elif hifi and orig:
             label = f"{name} · full fidelity · {orig:,} rows"
         return _render_text(staged["csv"], name, label, hifi)
-
-    @app.callback(
-        Output("engine-data", "data", allow_duplicate=True),
-        Output("scrub", "max", allow_duplicate=True),
-        Output("scrub", "step", allow_duplicate=True),
-        Output("scrub", "value", allow_duplicate=True),
-        Output("play", "children", allow_duplicate=True),
-        Output("file-label", "children", allow_duplicate=True),
-        Input("url-go", "n_clicks"),
-        Input("url-in", "n_submit"),
-        State("url-in", "value"),
-        State("hifi", "value"),
-        prevent_initial_call=True,
-    )
-    def _load_url(_clicks, _submit, url, hifi_value):
-        if not url:
-            return (no_update,) * 6
-        name = url.rsplit("/", 1)[-1] or "remote log"
-        try:
-            text = _fetch_log(url, config.upload_max_bytes)
-        except Exception as exc:  # noqa: BLE001 - surface fetch errors to the UI
-            return _error(name, exc)
-        return _render_text(text, name, name, bool(hifi_value))
 
 
 def run(flight: FlightData | None = None, config: AppConfig | None = None,

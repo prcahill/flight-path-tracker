@@ -50,13 +50,12 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
   during playback: the map **stays fully draggable while the flight plays**,
   smoothness is independent of server latency, and every visitor gets an
   independent playback session (uploads are per-visitor too).
-- **Sensor stare-point view** — for KLV data carrying frame-center tags
-  (21/23/24), the map draws the sensor stare-point with a line from the
-  aircraft, plus a slant-range readout; the aircraft renders as a
-  heading-rotated plane icon.
+- **Sensor telemetry** — KLV attitude and slant-range fields (tags 5/6/7/21)
+  appear as live readout rows; the aircraft renders as a heading-rotated
+  plane icon.
 - **Segment analytics** — drag-select a time range on the profiles to get
   distance, speed, altitude band and climb stats for that leg.
-- **KML / GPX export** and **load-from-URL** (https, size-capped).
+- **KML / GPX export** of the loaded track.
 - **Production-tuned** — Brotli-compressed responses (~5-10x smaller first
   load), orjson serialization, `/healthz` for health checks and uptime pings.
 

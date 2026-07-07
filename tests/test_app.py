@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from flighttracker import AppConfig, load_flight_data
-from flighttracker.app import _fetch_log, _flight_package, _State, create_app
+from flighttracker.app import _flight_package, _State, create_app
 from flighttracker.sample import generate_sample_klv_text
 
 
@@ -92,15 +92,6 @@ def test_hifi_budgets_and_label(klv_flight, tmp_path):
     result = upload_cb(staged, ["on"])
     assert "full fidelity · 3,001 rows" in result[0]["label"]
     assert len(result[0]["t"]) == 3001
-
-
-def test_fetch_log_rejects_bad_urls():
-    with pytest.raises(ValueError, match="https"):
-        _fetch_log("http://example.com/a.csv", 1000)
-    with pytest.raises(ValueError, match="non-public"):
-        _fetch_log("https://127.0.0.1/a.csv", 1000)
-    with pytest.raises(ValueError, match="non-public"):
-        _fetch_log("https://localhost/a.csv", 1000)
 
 
 def test_klv_sensor_tags(tmp_path):

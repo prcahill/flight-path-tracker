@@ -138,9 +138,14 @@ body {
     text-overflow: ellipsis;
 }
 .fchip-x {
-    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 13px;
     line-height: 1;
-    padding: 2px 4px;
+    padding-bottom: 1.5px;   /* optical centering of the × glyph */
     border-radius: 50%;
     opacity: 0.7;
 }
@@ -359,20 +364,6 @@ body {
     transition: border-color 120ms, color 120ms;
 }
 .ghost:hover { border-color: var(--accent); color: var(--text); }
-.ghost.go { width: 44px; }
-.url-in {
-    height: 34px;
-    width: 210px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: 12px;
-    padding: 0 10px;
-    transition: border-color 120ms;
-}
-.url-in::placeholder { color: var(--muted); opacity: 0.75; }
-.url-in:focus { border-color: var(--accent); outline: none; }
 .play {
     height: 38px;
     background: var(--accent);

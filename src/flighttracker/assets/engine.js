@@ -132,7 +132,7 @@ window.FT = (function () {
   }
 
   // ---- map layer management ----------------------------------------------
-  var CORE_LAYERS = ["ft-halo", "ft-stare-line", "ft-stare-pt", "ft-ac", "ft-ac-fb"];
+  var CORE_LAYERS = ["ft-halo", "ft-ac", "ft-ac-fb"];
   var planeOk = false;
 
   function planeImage() {
@@ -183,16 +183,6 @@ window.FT = (function () {
     if (!m.getLayer("ft-halo")) {
       m.addLayer({id: "ft-halo", type: "circle", source: "ft-halo-src",
         paint: {"circle-radius": 13, "circle-color": "rgba(44,123,229,0.38)"}});
-    }
-    if (!m.getSource("ft-stare-src")) {
-      m.addSource("ft-stare-src", {type: "geojson", data: EMPTY_FC});
-      m.addSource("ft-stare-pt-src", {type: "geojson", data: EMPTY_FC});
-    }
-    if (!m.getLayer("ft-stare-line")) {
-      m.addLayer({id: "ft-stare-line", type: "line", source: "ft-stare-src",
-        paint: {"line-color": "#FFB020", "line-width": 1.5, "line-opacity": 0.9}});
-      m.addLayer({id: "ft-stare-pt", type: "circle", source: "ft-stare-pt-src",
-        paint: {"circle-radius": 5.5, "circle-color": "#FFB020"}});
     }
     if (!m.getSource("ft-ac-src")) {
       m.addSource("ft-ac-src", {type: "geojson", data: EMPTY_FC});
@@ -271,15 +261,6 @@ window.FT = (function () {
     try {
       m.getSource("ft-halo-src").setData(pointFC(s.lon, s.lat));
       m.getSource("ft-ac-src").setData(pointFC(s.lon, s.lat, {hdg: s.hdg}));
-      if (s.fcLat != null && s.fcLon != null) {
-        m.getSource("ft-stare-src").setData({type: "FeatureCollection",
-          features: [{type: "Feature", geometry: {type: "LineString",
-            coordinates: [[s.lon, s.lat], [s.fcLon, s.fcLat]]}, properties: {}}]});
-        m.getSource("ft-stare-pt-src").setData(pointFC(s.fcLon, s.fcLat));
-      } else {
-        m.getSource("ft-stare-src").setData(EMPTY_FC);
-        m.getSource("ft-stare-pt-src").setData(EMPTY_FC);
-      }
     } catch (e) { /* map still initializing */ }
     if (follow) {
       m.jumpTo({center: [s.lon, s.lat]});
@@ -539,8 +520,6 @@ window.FT = (function () {
           try {
             m.getSource("ft-halo-src").setData(EMPTY_FC);
             m.getSource("ft-ac-src").setData(EMPTY_FC);
-            m.getSource("ft-stare-src").setData(EMPTY_FC);
-            m.getSource("ft-stare-pt-src").setData(EMPTY_FC);
           } catch (e) {}
         }
         return;
