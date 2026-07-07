@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2C7BE5"/>
+      <stop offset="0.55" stop-color="#16418C"/>
+      <stop offset="1" stop-color="#0A1C3C"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#39a2fc"/>
+      <stop offset="0.4" stop-color="#24eca6"/>
+      <stop offset="0.7" stop-color="#f3c63a"/>
+      <stop offset="1" stop-color="#f36315"/>
+    </linearGradient>
+  </defs>
+
+  <!-- badge -->
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="url(#bg)"/>
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="none"
+        stroke="rgba(255,255,255,0.16)" stroke-width="1.5"/>
+
+  <!-- altitude-colored flight path trail (dotted, climbing) -->
+  <path d="M 10 53 C 25 54, 25 40, 33 31" fill="none" stroke="url(#trail)"
+        stroke-width="3.6" stroke-linecap="round" stroke-dasharray="0.1 7.2"/>
+
+  <!-- aircraft climbing north-east -->
+  <g transform="translate(40.5,22.5) rotate(45) scale(0.78)">
+    <path d="M 0,-18 L 2.5,-14 L 3,-7 L 17,3 L 17,7 L 3.5,4 L 2.5,12 L 7,16
+             L 7,19 L 0,17 L -7,19 L -7,16 L -2.5,12 L -3.5,4 L -17,7 L -17,3
+             L -3,-7 L -2.5,-14 Z"
+          fill="#FFFFFF" stroke="#0A1526" stroke-width="1.6"
+          stroke-linejoin="round"/>
+  </g>
+</svg>

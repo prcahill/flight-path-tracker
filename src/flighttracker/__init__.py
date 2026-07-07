@@ -15,7 +15,7 @@ from .data import load_flight_data
 from .metrics import FlightData, FlightSummary
 from .sample import generate_sample_flight_data, generate_sample_klv_text
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 __all__ = [
     "AppConfig",

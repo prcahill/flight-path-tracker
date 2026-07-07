@@ -269,6 +269,26 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         from . import __version__
         return {"status": "ok", "version": __version__}
 
+    # Use the logo as the favicon (placed after {%favicon%} so it wins).
+    app.index_string = """<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        <link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
+        {%css%}
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>"""
+
     boot_package = None
     if flight is not None:
         boot_package = _flight_package(_State(flight, config))
@@ -277,11 +297,9 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         # Header
         html.Div(className="header", children=[
             html.Div(className="brand", children=[
-                html.Div("✈", className="brand-mark"),
-                html.Div(children=[
-                    html.Div("FLIGHT PATH TRACKER", className="title"),
-                    html.Div("TELEMETRY REPLAY CONSOLE", className="subtitle"),
-                ]),
+                html.Img(src="/assets/logo.svg", className="brand-logo",
+                         alt="Flight Path Tracker"),
+                html.Div("FLIGHT PATH TRACKER", className="title"),
             ]),
             html.Div(id="roster", className="roster"),
             html.Div(id="file-label", className="chip status"),
@@ -322,7 +340,7 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             ]),
             html.Div(className="side", children=[
                 html.Div(className="panel", children=[
-                    html.Div("LIVE TELEMETRY", className="panel-title"),
+                    html.Div("LIVE FLIGHT DATA", className="panel-title"),
                     html.Div(id="readout", className="readout",
                              children=_readout_skeleton()),
                 ]),
