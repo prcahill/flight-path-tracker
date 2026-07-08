@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flight-path-tracker"
-version = "0.6.2"
+version = "0.6.3"
 description = "Interactive dashboard to replay aircraft flight paths from lat/lon/altitude logs."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,7 +49,7 @@ Repository = "https://github.com/prcahill/flight-path-tracker"
 where = ["src"]
 
 [tool.setuptools.package-data]
-flighttracker = ["assets/*.css", "assets/*.js"]
+flighttracker = ["assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
