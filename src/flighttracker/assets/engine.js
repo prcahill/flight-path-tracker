@@ -22,6 +22,8 @@ window.FT = (function () {
   var playing = false;
   var speed = 25;
   var follow = false;
+  var threeD = false;
+  var camBearing = 0;    // damped chase-camera bearing, degrees
   var curTime = 0;
   var anchorWall = 0;
   var anchorData = 0;
@@ -239,8 +241,49 @@ window.FT = (function () {
       ensureCoreLayers(m);
       bumpCore(m);
       applyEmphasis(m);
+      // Enforce the 3D state on every rebuild: basemap changes drop terrain,
+      // and a 3D-off during a style transition can leave it stuck on.
+      if (threeD) ensureTerrain(m);
+      else if (m.getTerrain()) clearTerrain(m);
       return true;
     } catch (e) { return false; }
+  }
+
+  // ---- 3D terrain -----------------------------------------------------------
+  // Free, keyless AWS Open Data terrain tiles (Mapzen terrarium encoding).
+  var DEM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+
+  function ensureTerrain(m) {
+    try {
+      if (!m.getSource("ft-dem")) {
+        m.addSource("ft-dem", {type: "raster-dem", tiles: [DEM_URL],
+          encoding: "terrarium", tileSize: 256, maxzoom: 15,
+          attribution: "Terrain: Mapzen/AWS Open Data"});
+      }
+      if (!m.getTerrain()) m.setTerrain({source: "ft-dem", exaggeration: 1.3});
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function clearTerrain(m) {
+    try { m.setTerrain(null); } catch (e) {}
+  }
+
+  function syncCam(m) {
+    // Keep plotly's stored layout in step with the real camera so a later
+    // figure-level pass cannot snap pitch/bearing/center back.
+    var g = gd();
+    if (!g || !g.layout.map) return;
+    var c = m.getCenter();
+    var cam = {lat: c.lat, lon: c.lng};
+    g.layout.map.center = cam;
+    g.layout.map.zoom = m.getZoom();
+    g.layout.map.pitch = m.getPitch();
+    g.layout.map.bearing = m.getBearing();
+    g._fullLayout.map.center = cam;
+    g._fullLayout.map.zoom = m.getZoom();
+    g._fullLayout.map.pitch = m.getPitch();
+    g._fullLayout.map.bearing = m.getBearing();
   }
 
   function dropFlightLayers(m, pkg) {
@@ -263,12 +306,16 @@ window.FT = (function () {
       m.getSource("ft-ac-src").setData(pointFC(s.lon, s.lat, {hdg: s.hdg}));
     } catch (e) { /* map still initializing */ }
     if (follow) {
-      m.jumpTo({center: [s.lon, s.lat]});
-      var g = gd();
-      if (g && g.layout.map) {
-        g.layout.map.center = {lat: s.lat, lon: s.lon};
-        g._fullLayout.map.center = {lat: s.lat, lon: s.lon};
+      if (threeD) {
+        // Chase cam: damp the bearing toward the aircraft heading so the
+        // world banks smoothly through turns instead of jittering.
+        var diff = ((s.hdg - camBearing + 540) % 360) - 180;
+        camBearing = (camBearing + diff * 0.12 + 360) % 360;
+        m.jumpTo({center: [s.lon, s.lat], bearing: camBearing});
+      } else {
+        m.jumpTo({center: [s.lon, s.lat]});
       }
+      syncCam(m);
     }
   }
 
@@ -412,14 +459,10 @@ window.FT = (function () {
   function fitActive() {
     var m = mapObj();
     if (!m || !d) return;
-    m.jumpTo({center: [d.meta.center_lon, d.meta.center_lat], zoom: d.meta.fit_zoom});
-    var g = gd();
-    if (g && g.layout.map) {
-      g.layout.map.center = {lat: d.meta.center_lat, lon: d.meta.center_lon};
-      g.layout.map.zoom = d.meta.fit_zoom;
-      g._fullLayout.map.center = g.layout.map.center;
-      g._fullLayout.map.zoom = d.meta.fit_zoom;
-    }
+    m.jumpTo({center: [d.meta.center_lon, d.meta.center_lat],
+              zoom: d.meta.fit_zoom, bearing: 0,
+              pitch: threeD ? 55 : 0});
+    syncCam(m);
   }
 
   // ---- playback loop --------------------------------------------------------
@@ -570,10 +613,37 @@ window.FT = (function () {
       if (!m || !d) return;
       if (follow) {
         var s = sample(curTime);
-        m.jumpTo({center: [s.lon, s.lat], zoom: d.meta.follow_zoom});
+        camBearing = s.hdg;
+        m.easeTo({center: [s.lon, s.lat],
+                  zoom: d.meta.follow_zoom + (threeD ? 2 : 0),
+                  pitch: threeD ? 60 : 0,
+                  bearing: threeD ? s.hdg : 0,
+                  duration: 700});
+        syncCam(m);
       } else {
         fitActive();
       }
+    },
+    set3D: function (on) {
+      threeD = !!on;
+      var m = mapObj();
+      if (!m) return;
+      if (threeD) {
+        ensureTerrain(m);
+        var opts = {pitch: follow ? 60 : 55, duration: 700};
+        if (follow && d) {
+          var s = sample(curTime);
+          camBearing = s.hdg;
+          opts.bearing = s.hdg;
+          opts.zoom = d.meta.follow_zoom + 2;
+          opts.center = [s.lon, s.lat];
+        }
+        m.easeTo(opts);
+      } else {
+        clearTerrain(m);
+        m.easeTo({pitch: 0, bearing: 0, duration: 700});
+      }
+      setTimeout(function () { syncCam(m); }, 750);
     },
     setBasemap: function (style) {
       var g = gd();

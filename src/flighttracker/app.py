@@ -310,6 +310,11 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
                              searchable=False),
                 dcc.Checklist(id="follow", className="follow",
                               options=[{"label": "FOLLOW", "value": "on"}], value=[]),
+                html.Div(title="Terrain-relief 3D view. Combine with FOLLOW for a "
+                               "chase camera that banks through turns.",
+                         children=dcc.Checklist(
+                             id="view3d", className="follow",
+                             options=[{"label": "3D", "value": "on"}], value=[])),
                 html.Div(title="Full fidelity for the next file load: no upload "
                                "downsampling (exact metrics from every sample) and "
                                "much higher display/playback detail. Slower with "
@@ -406,6 +411,12 @@ def _register_callbacks(app: Dash, config: AppConfig) -> None:
         "function(v){ if (window.FT) { window.FT.setFollow(v && v.length > 0); } return null; }",
         Output("cs-ack", "data", allow_duplicate=True),
         Input("follow", "value"),
+        prevent_initial_call=True,
+    )
+    app.clientside_callback(
+        "function(v){ if (window.FT) { window.FT.set3D(v && v.length > 0); } return null; }",
+        Output("cs-ack", "data", allow_duplicate=True),
+        Input("view3d", "value"),
         prevent_initial_call=True,
     )
     app.clientside_callback(

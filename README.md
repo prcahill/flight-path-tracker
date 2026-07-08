@@ -53,6 +53,10 @@ Units are aviation-standard: **feet**, **knots**, **nautical miles**.
 - **Sensor telemetry** — KLV attitude and slant-range fields (tags 5/6/7/21)
   appear as live readout rows; the aircraft renders as a heading-rotated
   plane icon.
+- **3D terrain view** — the 3D toggle adds real elevation relief (free AWS
+  Open Data terrain tiles, no API key) with a tilted camera; combined with
+  FOLLOW it becomes a chase camera whose bearing banks smoothly through
+  turns behind the aircraft.
 - **Segment analytics** — drag-select a time range on the profiles to get
   distance, speed, altitude band and climb stats for that leg.
 - **KML / GPX export** of the loaded track.
