@@ -306,7 +306,8 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
             html.Div(className="header-controls", children=[
                 dcc.Dropdown(id="basemap", className="dd",
                              options=[{"label": s, "value": s} for s in config.basemap_styles],
-                             value=config.default_style, clearable=False),
+                             value=config.default_style, clearable=False,
+                             searchable=False),
                 dcc.Checklist(id="follow", className="follow",
                               options=[{"label": "FOLLOW", "value": "on"}], value=[]),
                 html.Div(title="Full fidelity for the next file load: no upload "
@@ -356,6 +357,7 @@ def create_app(flight: FlightData | None = None, config: AppConfig | None = None
         html.Div(className="controls", children=[
             html.Button("▶  PLAY", id="play", className="play"),
             dcc.Dropdown(id="speed", className="dd speed", clearable=False,
+                         searchable=False,
                          options=[{"label": f"{m}×", "value": m} for m in config.speed_multipliers],
                          value=25),
             dcc.Slider(id="scrub", min=0, max=1, value=0, step=0.1,

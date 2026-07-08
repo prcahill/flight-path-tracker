@@ -413,13 +413,16 @@ body {
     background-color: var(--accent) !important;
     color: #fff !important;
 }
-.dash-dropdown-content input {
+.dash-dropdown-content input,
+.dash-dropdown-content [class*="search"],
+.dash-dropdown-content [class*="Search"] {
     background-color: var(--panel) !important;
-    border: 1px solid var(--border) !important;
+    border-color: var(--border) !important;
     color: var(--text) !important;
     border-radius: 6px;
 }
 .dash-dropdown-content input::placeholder { color: var(--muted) !important; }
+.dash-dropdown-content svg { color: var(--muted); fill: var(--muted); }
 
 /* ---------- dcc.Checklist (Follow) rendered as a pill toggle ---------- */
 .follow .dash-options-list-option {
