@@ -178,6 +178,11 @@ def _flight_package(state: _State, label: str | None = None) -> dict:
             "center_lon": float(np.mean(lon_lim)),
             "alt_min": alt_min,
             "alt_max": alt_max,
+            "model_px": c.model_px,
+            "chase_back_m": c.chase_back_m,
+            "chase_above_m": c.chase_above_m,
+            "chase_aim_deg": c.chase_aim_deg,
+            "chase_damp": c.chase_damp,
         },
     }
 

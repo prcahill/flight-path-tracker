@@ -60,6 +60,13 @@ class AppConfig:
     # Map.
     default_style: str = "carto-darkmatter"
     follow_zoom: float = 8.5       # zoom level used when "Follow" is on
+
+    # 3D aircraft model + chase camera.
+    model_px: float = 64.0         # target on-screen aircraft length, px
+    chase_back_m: float = 900.0    # chase camera distance behind aircraft, m
+    chase_above_m: float = 350.0   # chase camera height above aircraft, m
+    chase_aim_deg: float = 7.0     # aircraft this many degrees below screen center
+    chase_damp: float = 0.12       # per-frame chase bearing damping
     basemap_styles: tuple[str, ...] = field(default_factory=lambda: BASEMAP_STYLES)
     speed_multipliers: tuple[int, ...] = field(default_factory=lambda: SPEED_MULTIPLIERS)
 
